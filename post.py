@@ -210,21 +210,42 @@ def post_to_jugem(title: str, body: str) -> str:
         if name:
             hidden[name] = value
 
+    # 現在のJST日時をフォームに明示的にセット
+    now = datetime.now(JST)
+
     # ── 4. 確認ページを経由して記事を公開 ──
     # JUGEM は confirm → insert の2段階。confirm だけでは下書き状態。
+    post_params = {
+        **hidden,
+        "title":       title,
+        "description": body,
+        "mode":        "write",
+        "action":      "confirm",
+        "state":       "1",          # 1=公開, 2=下書き
+        "year":        str(now.year),
+        "month":       str(now.month).zfill(2),
+        "day":         str(now.day).zfill(2),
+        "hour":        str(now.hour).zfill(2),
+        "minute":      str(now.minute).zfill(2),
+    }
     print(f"  → 確認ページ送信: {form_action}")
+    print(f"  → hidden fields: {list(hidden.keys())}")
     conf_html, conf_final = do_post(
         form_action,
-        {**hidden, "title": title, "description": body, "mode": "write", "action": "confirm"},
+        post_params,
         extra_headers={"Referer": entry_final},
     )
     print(f"  → 確認後URL: {conf_final}")
+    print(f"  → 確認ページ冒頭: {conf_html[:500]}")
 
     # 確認ページの hidden fields を取得して insert（公開）
     conf_hidden = dict(re.findall(
         r'<input[^>]+name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
         conf_html, re.IGNORECASE
     ))
+    print(f"  → confirm hidden fields: {list(conf_hidden.keys())}")
+    # state が confirm から引き継がれない場合は上書き
+    conf_hidden.setdefault("state", "1")
     print(f"  → 公開送信 (action=insert): {form_action}")
     done_html, done_final = do_post(
         form_action,
@@ -232,6 +253,7 @@ def post_to_jugem(title: str, body: str) -> str:
         extra_headers={"Referer": conf_final},
     )
     print(f"  → 公開後URL: {done_final}")
+    print(f"  → 公開後レスポンス冒頭: {done_html[:500]}")
 
     eid_m = re.search(r'eid=(\d+)', done_final + done_html)
     return eid_m.group(1) if eid_m else "ok"
