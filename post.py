@@ -18,7 +18,7 @@ JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
-JUGEM_ATOM_URL   = "https://jugem.jp/atom/entry/"
+JUGEM_ATOM_URL   = "https://nadaryu.jugem.cc/atom/entry/"
 GEMINI_MODEL     = "gemini-2.5-flash"
 # ────────────────────────────────────────────────────────
 
