@@ -123,18 +123,31 @@ def post_to_jugem(title: str, body: str) -> str:
         urllib.request.HTTPCookieProcessor(jar),
         urllib.request.HTTPRedirectHandler(),
     )
-    opener.addheaders = [("User-Agent", "Mozilla/5.0 (compatible; bot/1.0)")]
+    # ブラウザと区別がつかないようなヘッダーを設定
+    opener.addheaders = [
+        ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36"),
+        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        ("Accept-Language", "ja,en-US;q=0.7,en;q=0.3"),
+        ("Accept-Encoding", "identity"),
+    ]
 
-    def get(url):
-        res = opener.open(url, timeout=20)
+    def get(url, referer=None):
+        req = urllib.request.Request(url)
+        if referer:
+            req.add_header("Referer", referer)
+        res = opener.open(req, timeout=20)
         return res, res.read().decode("utf-8", errors="ignore")
 
-    def post(url, params: dict):
+    def post(url, params: dict, referer=None):
         data = urllib.parse.urlencode(params).encode()
         req = urllib.request.Request(
             url, data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
+        if referer:
+            req.add_header("Referer", referer)
         res = opener.open(req, timeout=20)
         return res, res.read().decode("utf-8", errors="ignore")
 
@@ -142,27 +155,28 @@ def post_to_jugem(title: str, body: str) -> str:
     login_url = f"{JUGEM_BASE}/manage/?mode=login"
     get(login_url)
 
-    # ── 2. ログイン POST ──
+    # ── 2. ログイン POST（Refererをログインページに設定）──
     res, html = post(login_url, {
         "jugem_id": JUGEM_USER,
         "password": JUGEM_PASS,
         "mode":     "login",
         "action":   "login",
-    })
+    }, referer=login_url)
     print(f"  → ログイン後URL: {res.url}")
 
     # ログイン成功確認（管理トップへリダイレクトされているはず）
     if "ログアウト" not in html and "logout" not in html.lower():
         # ダッシュボードを明示取得して再確認
-        _, html2 = get(f"{JUGEM_BASE}/manage/?mode=top")
+        _, html2 = get(f"{JUGEM_BASE}/manage/?mode=top", referer=login_url)
         if "ログアウト" not in html2 and "logout" not in html2.lower():
             raise RuntimeError("ログイン失敗。JUGEM_USER / JUGEM_PASS を確認してください。")
         html = html2
     print("  → ログイン成功")
 
     # ── 3. 記事投稿フォームページ取得（hidden フィールド収集）──
+    top_url = f"{JUGEM_BASE}/manage/?mode=top"
     entry_top_url = f"{JUGEM_BASE}/manage/?mode=entry"
-    _, entry_html = get(entry_top_url)
+    _, entry_html = get(entry_top_url, referer=top_url)
 
     # hidden フィールドを抽出して hidden_params に格納
     import re
@@ -191,7 +205,7 @@ def post_to_jugem(title: str, body: str) -> str:
         "tag":     "",
     }
     entry_post_url = f"{JUGEM_BASE}/manage/?mode=entry&action=insert"
-    res, html = post(entry_post_url, post_params)
+    res, html = post(entry_post_url, post_params, referer=entry_top_url)
     print(f"  → 投稿後URL: {res.url}")
     print(f"  → レスポンス先頭200字: {html[:200]}")
 
