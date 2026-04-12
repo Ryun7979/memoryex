@@ -242,15 +242,20 @@ def post_to_jugem(title: str, body: str) -> str:
         selects[sel_name] = sel_m.group(1) if sel_m else ""
     print(f"  → select fields: {selects}")
 
-    # ── 4. action パラメータなしで POST（select フィールドも含む）──
+    # ── 4. 全フィールド + action=insert で POST ──
     insert_params = {
         **hidden,
-        **selects,           # category_id など select 要素を全て含む
+        # select フィールド（category_id など）を個別に追加（hidden との重複を避ける）
+        "category_id": selects.get("category_id", "0"),
+        "theme_id":    selects.get("theme_id", "0"),
+        "accept_cm":   selects.get("accept_cm", "0"),
+        "ping_state":  selects.get("ping_state", "1"),
         "title":       title,
         "description": body,
         "sequel":      "",
         "state":       "1",
         "set_date":    "0",
+        "action":      "insert",   # 明示的に insert を指定
     }
     print(f"  → POST params keys: {list(insert_params.keys())}")
     done_html, done_final = do_post(
@@ -260,12 +265,16 @@ def post_to_jugem(title: str, body: str) -> str:
     )
     print(f"  → 公開後URL: {done_final}")
     all_eids = re.findall(r'eid=(\d+)', done_html)
-    print(f"  → eid 一覧: {all_eids[:10]}")
+    print(f"  → done_html eid 一覧: {all_eids[:10]}")
 
-    # POST 後に管理トップで最新 eid を確認
+    # POST 後に管理トップで最新 eid を確認（増えていれば成功）
     top_html, _ = do_get(f"{manage_base}?mode=top")
     top_eids = re.findall(r'eid=(\d+)', top_html)
     print(f"  → manage top の eid 一覧: {top_eids[:10]}")
+    # 応答HTML内のエラーメッセージ候補
+    err_candidates = re.findall(r'<[^>]+class=["\'][^"\']*(?:error|alert|warn)[^"\']*["\'][^>]*>([^<]{3,60})', done_html, re.IGNORECASE)
+    if err_candidates:
+        print(f"  → エラーDiv候補: {err_candidates[:5]}")
 
     # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
     eid_m = re.search(r'eid=(\d+)', done_final)
