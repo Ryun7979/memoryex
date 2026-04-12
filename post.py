@@ -87,7 +87,7 @@ def format_with_gemini(messages: list[str]) -> dict:
     }).encode()
 
     url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"https://generativelanguage.googleapis.com/v1/models/"
         f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
     req = urllib.request.Request(
