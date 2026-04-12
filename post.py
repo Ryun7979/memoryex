@@ -5,11 +5,9 @@ Telegram の今日のメモを Gemini で整形して JUGEM ブログに投稿�
 
 import os
 import json
+import base64
 import urllib.request
 import urllib.error
-import re
-import urllib.parse
-import http.cookiejar
 from datetime import datetime, timezone, timedelta
 
 # ── 設定 ────────────────────────────────────────────────
@@ -19,9 +17,9 @@ GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
 JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
-JST          = timezone(timedelta(hours=9))
-JUGEM_BASE   = "https://nadaryu.jugem.cc"
-GEMINI_MODEL = "gemini-2.5-flash"
+JST              = timezone(timedelta(hours=9))
+JUGEM_ATOM_URL   = "https://jugem.jp/atom/entry/"
+GEMINI_MODEL     = "gemini-2.5-flash"
 # ────────────────────────────────────────────────────────
 
 
@@ -117,135 +115,57 @@ def format_with_gemini(messages: list[str]) -> dict:
 
 
 def post_to_jugem(title: str, body: str) -> str:
-    """JUGEM管理画面にHTTPフォーム送信でログインして記事を投稿する。"""
+    """JUGEM AtomPub API で記事を投稿する（Basic認証）。"""
 
-    jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(jar),
-        urllib.request.HTTPRedirectHandler(),
+    now_str = datetime.now(JST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+    atom_entry = f"""<?xml version="1.0" encoding="UTF-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom">
+  <title>{_xml_escape(title)}</title>
+  <content type="html">{_xml_escape(body)}</content>
+  <updated>{now_str}</updated>
+  <app:control xmlns:app="http://www.w3.org/2007/app">
+    <app:draft>no</app:draft>
+  </app:control>
+</entry>"""
+
+    credentials = base64.b64encode(
+        f"{JUGEM_USER}:{JUGEM_PASS}".encode()
+    ).decode()
+
+    req = urllib.request.Request(
+        JUGEM_ATOM_URL,
+        data=atom_entry.encode("utf-8"),
+        headers={
+            "Content-Type": "application/atom+xml; charset=utf-8",
+            "Authorization": f"Basic {credentials}",
+            "User-Agent": "Mozilla/5.0",
+        },
+        method="POST",
     )
-    # ブラウザと区別がつかないようなヘッダーを設定
-    opener.addheaders = [
-        ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/124.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
-        ("Accept-Language", "ja,en-US;q=0.7,en;q=0.3"),
-        ("Accept-Encoding", "identity"),
-    ]
 
-    def get(url, referer=None):
-        req = urllib.request.Request(url)
-        if referer:
-            req.add_header("Referer", referer)
-        res = opener.open(req, timeout=20)
-        return res, res.read().decode("utf-8", errors="ignore")
-
-    def post(url, params: dict, referer=None):
-        data = urllib.parse.urlencode(params).encode()
-        req = urllib.request.Request(
-            url, data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+    try:
+        with urllib.request.urlopen(req, timeout=20) as res:
+            resp_body = res.read().decode("utf-8", errors="ignore")
+            print(f"  → AtomPub ステータス: {res.status}")
+            print(f"  → レスポンス先頭300字: {resp_body[:300]}")
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(
+            f"AtomPub 投稿失敗 HTTP {e.code}: {err_body[:300]}"
         )
-        if referer:
-            req.add_header("Referer", referer)
-        res = opener.open(req, timeout=20)
-        return res, res.read().decode("utf-8", errors="ignore")
 
-    # ── 1. ログインページ取得（jugem.jp にリダイレクトされる可能性あり）──
-    manage_login_url = f"{JUGEM_BASE}/manage/?mode=login"
-    res, html = get(manage_login_url)
-    actual_login_url = res.url  # リダイレクト後の実際のURL
-    print(f"  → ログインページURL: {actual_login_url}")
+    # Location ヘッダーから記事ID を取り出す
+    import re
+    eid_m = re.search(r'eid=(\d+)|/entry/(\d+)', resp_body)
+    return eid_m.group(1) or eid_m.group(2) if eid_m else "ok"
 
-    # ── 2. ログインフォームの action と hidden フィールドを取得 ──
-    # <form ... action="..."> を探す
-    form_action_m = re.search(
-        r'<form[^>]+action=["\']([^"\']+)["\']', html, re.IGNORECASE
-    )
-    form_action = form_action_m.group(1) if form_action_m else actual_login_url
-    # 相対URLの場合は絶対URLに変換
-    if form_action.startswith("/"):
-        p = urllib.parse.urlparse(actual_login_url)
-        form_action = f"{p.scheme}://{p.netloc}{form_action}"
-    print(f"  → フォームaction: {form_action}")
 
-    # hidden フィールド収集
-    login_hidden: dict[str, str] = {}
-    for m in re.finditer(
-        r'<input[^>]+type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
-        html, re.IGNORECASE
-    ):
-        login_hidden[m.group(1)] = m.group(2)
-    for m in re.finditer(
-        r'<input[^>]+name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\']',
-        html, re.IGNORECASE
-    ):
-        login_hidden[m.group(1)] = m.group(2)
-
-    # ── 3. ログイン POST ──
-    # フィールド名はサイトによって異なるため両方試す
-    login_params = {
-        **login_hidden,
-        "jugem_id": JUGEM_USER,
-        "user_id":  JUGEM_USER,   # jugem.jp 側のフィールド名候補
-        "password": JUGEM_PASS,
-        "mode":     "login",
-        "action":   "login",
-    }
-    res, html = post(form_action, login_params, referer=actual_login_url)
-    print(f"  → ログイン後URL: {res.url}")
-
-    # ログイン成功確認
-    if "ログアウト" not in html and "logout" not in html.lower():
-        _, html2 = get(f"{JUGEM_BASE}/manage/?mode=top", referer=res.url)
-        if "ログアウト" not in html2 and "logout" not in html2.lower():
-            print(f"  → ログイン失敗時HTML先頭: {html[:500]}")
-            raise RuntimeError("ログイン失敗。JUGEM_USER / JUGEM_PASS を確認してください。")
-        html = html2
-    print("  → ログイン成功")
-
-    # ── 4. 記事投稿フォームページ取得（hidden フィールド収集）──
-    top_url = f"{JUGEM_BASE}/manage/?mode=top"
-    entry_top_url = f"{JUGEM_BASE}/manage/?mode=entry"
-    _, entry_html = get(entry_top_url, referer=top_url)
-
-    hidden_params: dict[str, str] = {}
-    for m in re.finditer(
-        r'<input[^>]+type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
-        entry_html, re.IGNORECASE
-    ):
-        hidden_params[m.group(1)] = m.group(2)
-    # name/value の順が逆のパターンも拾う
-    for m in re.finditer(
-        r'<input[^>]+name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\']',
-        entry_html, re.IGNORECASE
-    ):
-        hidden_params[m.group(1)] = m.group(2)
-
-    # ── 5. 記事投稿 POST ──
-    post_params = {
-        **hidden_params,
-        "mode":    "entry",
-        "action":  "insert",
-        "subject": title,
-        "body":    body,
-        "extend":  "",
-        "status":  "1",   # 1=公開
-        "tag":     "",
-    }
-    entry_post_url = f"{JUGEM_BASE}/manage/?mode=entry&action=insert"
-    res, html = post(entry_post_url, post_params, referer=entry_top_url)
-    print(f"  → 投稿後URL: {res.url}")
-    print(f"  → レスポンス先頭200字: {html[:200]}")
-
-    # 成功判定：「投稿しました」または管理画面のentry一覧へリダイレクト
-    if "投稿しました" in html or "mode=entry" in res.url or res.status == 200:
-        # URLからeid（記事ID）を取り出せれば返す
-        eid_m = re.search(r'eid=(\d+)', res.url + html)
-        return eid_m.group(1) if eid_m else "ok"
-
-    raise RuntimeError(f"投稿失敗: ステータス={res.status}\n{html[:500]}")
+def _xml_escape(text: str) -> str:
+    return (text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;"))
 
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
