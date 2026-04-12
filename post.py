@@ -210,28 +210,28 @@ def post_to_jugem(title: str, body: str) -> str:
         if name:
             hidden[name] = value
 
-    # ── 4. 記事を投稿 ──
-    # フィールド名: title（タイトル）、description（本文 textarea）
-    print(f"  → 記事投稿中: {form_action}")
+    # ── 4. 確認ページを経由して記事を公開 ──
+    # JUGEM は confirm → insert の2段階。confirm だけでは下書き状態。
+    print(f"  → 確認ページ送信: {form_action}")
     conf_html, conf_final = do_post(
         form_action,
         {**hidden, "title": title, "description": body, "mode": "write", "action": "confirm"},
         extra_headers={"Referer": entry_final},
     )
+    print(f"  → 確認後URL: {conf_final}")
 
-    # 確認ページがあれば最終 submit
-    if "confirm" in conf_final or "確認" in conf_html:
-        submit_hidden = dict(re.findall(
-            r'<input[^>]+name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
-            conf_html, re.IGNORECASE
-        ))
-        done_html, done_final = do_post(
-            form_action,
-            {**submit_hidden, "mode": "write", "action": "insert"},
-            extra_headers={"Referer": conf_final},
-        )
-    else:
-        done_html, done_final = conf_html, conf_final
+    # 確認ページの hidden fields を取得して insert（公開）
+    conf_hidden = dict(re.findall(
+        r'<input[^>]+name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
+        conf_html, re.IGNORECASE
+    ))
+    print(f"  → 公開送信 (action=insert): {form_action}")
+    done_html, done_final = do_post(
+        form_action,
+        {**conf_hidden, "title": title, "description": body, "mode": "write", "action": "insert"},
+        extra_headers={"Referer": conf_final},
+    )
+    print(f"  → 公開後URL: {done_final}")
 
     eid_m = re.search(r'eid=(\d+)', done_final + done_html)
     return eid_m.group(1) if eid_m else "ok"
