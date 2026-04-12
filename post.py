@@ -20,7 +20,7 @@ JUGEM_PASS       = os.environ["JUGEM_PASS"]
 JST              = timezone(timedelta(hours=9))
 JUGEM_XMLRPC_URL = "https://jugem.jp/xmlrpc/"   # JUGEM の XML-RPC エンドポイント
 JUGEM_BLOG_ID    = "1"                           # 通常は "1"（複数ブログなら要変更）
-GEMINI_MODEL     = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.0-flash-lite"
 # ────────────────────────────────────────────────────────
 
 
