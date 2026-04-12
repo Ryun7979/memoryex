@@ -18,8 +18,8 @@ JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
-JUGEM_XMLRPC_URL = "https://nadaryu.jugem.cc/xmlrpc/"
-JUGEM_BLOG_ID    = "1"                           # 通常は "1"（複数ブログなら要変更）
+JUGEM_XMLRPC_URL = "http://nadaryu.jugem.cc/admin/xmlrpc.php"
+JUGEM_BLOG_ID    = "0"                           # 通常は "1"（複数ブログなら要変更）
 GEMINI_MODEL = "gemini-2.5-flash"
 # ────────────────────────────────────────────────────────
 
