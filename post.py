@@ -21,8 +21,7 @@ JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
-JUGEM_ATOM_URL   = "https://nadaryu.jugem.cc/atom/entry/"
-GEMINI_MODEL     = "gemini-1.5-flash"
+GEMINI_MODEL     = "gemini-2.5-flash"
 # ────────────────────────────────────────────────────────
 
 
@@ -88,7 +87,7 @@ def format_with_gemini(messages: list[str]) -> dict:
     }).encode()
 
     url = (
-        f"https://generativelanguage.googleapis.com/v1/models/"
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
     req = urllib.request.Request(
@@ -157,132 +156,84 @@ def post_to_jugem(title: str, body: str) -> str:
         with opener.open(req, timeout=20) as res:
             return res.read().decode("utf-8", errors="ignore"), res.geturl()
 
-# ── 1. jugem.jp/login を GET して CSRF トークンとフォームフィールドを取得 ──
-    print("  → jugem.jp/login を GET...")
+    # ── 1. jugem.jp/login を GET して CSRF トークンを取得 ──
     login_html, _ = do_get("https://jugem.jp/login")
-    print(f"  → HTML 先頭1000字:\n{login_html[:1000]}")
-
-    # hidden _token を HTML から取得
     token_m = (
         re.search(r'<input[^>]+name=["\']_token["\'][^>]+value=["\']([^"\']+)["\']', login_html)
         or re.search(r'<input[^>]+value=["\']([^"\']+)["\'][^>]+name=["\']_token["\']', login_html)
     )
     if token_m:
         csrf_token = token_m.group(1)
-        print(f"  → CSRF token (HTML): {csrf_token[:30]}...")
     else:
-        # XSRF-TOKEN クッキーから取得（URL デコード必須）
         csrf_token = None
         for c in jar:
             if c.name == "XSRF-TOKEN":
                 csrf_token = urllib.parse.unquote(c.value)
                 break
-        if csrf_token:
-            print(f"  → CSRF token (cookie): {csrf_token[:30]}...")
-        else:
-            print("  ⚠️  CSRF token が見つかりません")
-
-    # フォームの input name 一覧を表示（デバッグ用）
-    input_names = re.findall(r'<input[^>]+name=["\']([^"\']+)["\']', login_html, re.IGNORECASE)
-    print(f"  → フォーム input names: {input_names}")
 
     # ── 2. jugem.jp/login に POST してログイン ──
-    # フォームフィールド: _token, account_name, password, is_sub_user, domain, redirect_url, isSavePass
-    login_payload = {
-        "_token":       csrf_token or "",
-        "account_name": JUGEM_USER,
-        "password":     JUGEM_PASS,
-        "is_sub_user":  "0",
-        "redirect_url": "",
-        "isSavePass":   "0",
-    }
-    print(f"  → POST jugem.jp/login [account_name=JUGEM_USER] ...")
-    try:
-        resp, final = do_post(
-            "https://jugem.jp/login",
-            login_payload,
-            extra_headers={"Referer": "https://jugem.jp/login"},
-        )
-        print(f"  → 最終URL: {final}")
-        print(f"  → レスポンス先頭300字: {resp[:300]}")
-        cookies_now = [(c.name, c.domain) for c in jar]
-        print(f"  → Cookie: {cookies_now}")
-        login_ok = "jugem.jp/login" not in final
-        print(f"  → ログイン{'成功' if login_ok else '失敗（ログインページに留まった）'}")
-    except urllib.error.HTTPError as e:
-        err = e.read().decode(errors="ignore")
-        print(f"  → HTTP {e.code}: {err[:300]}")
-        login_ok = False
-    except Exception as e:
-        print(f"  → 例外: {e}")
-        login_ok = False
-
-    if not login_ok:
-        raise RuntimeError("JUGEM 認証失敗。上記ログを確認してください。")
+    # フォームフィールド: _token, account_name, password, is_sub_user, redirect_url, isSavePass
+    print("  → JUGEM ログイン中...")
+    resp, final = do_post(
+        "https://jugem.jp/login",
+        {
+            "_token":       csrf_token or "",
+            "account_name": JUGEM_USER,
+            "password":     JUGEM_PASS,
+            "is_sub_user":  "0",
+            "redirect_url": "",
+            "isSavePass":   "0",
+        },
+        extra_headers={"Referer": "https://jugem.jp/login"},
+    )
+    if "jugem.jp/login" in final:
+        raise RuntimeError(f"JUGEM ログイン失敗（ログインページに留まった）: {final}")
+    print(f"  → ログイン成功: {final}")
 
     # ── 3. 記事投稿フォームを取得 ──
-    entry_url = f"https://nadaryu.jugem.cc/manage/?mode=entry"
-    print(f"  → 記事投稿ページ取得: {entry_url}")
-    entry_html, entry_final = do_get(entry_url)
-    print(f"  → 最終URL: {entry_final}")
-    print(f"  → HTML先頭300字: {entry_html[:300]}")
-
-    # ログイン画面に戻された場合
-    if "jugem.jp/login" in entry_final or "mode=login" in entry_final:
-        raise RuntimeError(f"セッション未確立。記事投稿ページにアクセスできません。final={entry_final}")
+    manage_base = final.split("?")[0]  # https://nadaryu.jugem.cc/manage/
+    entry_html, entry_final = do_get(f"{manage_base}?mode=entry")
+    if "jugem.jp/login" in entry_final:
+        raise RuntimeError(f"セッション未確立: {entry_final}")
 
     # フォームの action / hidden fields を収集
     form_action_m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
-    form_action = form_action_m.group(1) if form_action_m else entry_url
+    form_action = urllib.parse.urljoin(entry_final, form_action_m.group(1) if form_action_m else "")
     hidden = {}
     for m in re.finditer(
-        r'<input[^>]+type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
+        r'<input[^>]+(?:type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']'
+        r'|name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\'])',
         entry_html, re.IGNORECASE
     ):
-        hidden[m.group(1)] = m.group(2)
-    for m in re.finditer(
-        r'<input[^>]+name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\']',
-        entry_html, re.IGNORECASE
-    ):
-        hidden[m.group(1)] = m.group(2)
-    # 相対URLを絶対URLに変換
-    form_action_abs = urllib.parse.urljoin(entry_final, form_action)
-    print(f"  → フォームaction (絶対): {form_action_abs}")
-    print(f"  → hidden fields: {list(hidden.keys())}")
-    # HTMLの全 input name を出力（投稿フィールド名の確認用）
-    all_inputs = re.findall(r'<input[^>]+name=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
-    textarea_names = re.findall(r'<textarea[^>]+name=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
-    print(f"  → 全 input names: {all_inputs}")
-    print(f"  → textarea names: {textarea_names}")
+        name  = m.group(1) or m.group(3)
+        value = m.group(2) if m.group(2) is not None else m.group(4)
+        if name:
+            hidden[name] = value
 
     # ── 4. 記事を投稿 ──
-    post_params = {
-        **hidden,
-        "subject":  title,
-        "body":     body,
-        "mode":     "write",
-        "action":   "confirm",
-    }
-    print(f"  → 記事投稿 POST: {form_action_abs}")
-    conf_html, conf_final = do_post(form_action_abs, post_params,
-                                    extra_headers={"Referer": entry_final})
-    print(f"  → 確認ページ最終URL: {conf_final}")
-    print(f"  → 確認HTML先頭300字: {conf_html[:300]}")
+    # フィールド名: title（タイトル）、description（本文 textarea）
+    print(f"  → 記事投稿中: {form_action}")
+    conf_html, conf_final = do_post(
+        form_action,
+        {**hidden, "title": title, "description": body, "mode": "write", "action": "confirm"},
+        extra_headers={"Referer": entry_final},
+    )
 
-    # 確認ページがあれば submit
+    # 確認ページがあれば最終 submit
     if "confirm" in conf_final or "確認" in conf_html:
-        submit_params = {**hidden, "mode": "write", "action": "insert"}
-        submit_params.update(dict(re.findall(
+        submit_hidden = dict(re.findall(
             r'<input[^>]+name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
             conf_html, re.IGNORECASE
-        )))
-        done_html, done_final = do_post(form_action_abs, submit_params,
-                                        extra_headers={"Referer": conf_final})
-        print(f"  → 投稿完了URL: {done_final}")
+        ))
+        done_html, done_final = do_post(
+            form_action,
+            {**submit_hidden, "mode": "write", "action": "insert"},
+            extra_headers={"Referer": conf_final},
+        )
     else:
-        done_final = conf_final
+        done_html, done_final = conf_html, conf_final
 
-    eid_m = re.search(r'eid=(\d+)', done_final + conf_html)
+    eid_m = re.search(r'eid=(\d+)', done_final + done_html)
     return eid_m.group(1) if eid_m else "ok"
 
 def main():
