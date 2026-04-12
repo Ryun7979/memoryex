@@ -4,6 +4,7 @@ Telegram の今日のメモを Gemini で整形して JUGEM ブログに投稿�
 """
 
 import os
+import re
 import json
 import base64
 import time
@@ -125,45 +126,60 @@ def format_with_gemini(messages: list[str]) -> dict:
 
 def post_to_jugem(title: str, body: str) -> str:
     """JUGEM AtomPub API で記事を投稿する（Basic認証）。"""
-    import re
-
     credentials = base64.b64encode(
         f"{JUGEM_USER}:{JUGEM_PASS}".encode()
     ).decode()
     auth_header = f"Basic {credentials}"
 
-    def api_get(url):
+    # リダイレクトを追わずに Location ヘッダーを記録するハンドラ
+    class LogRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            print(f"  → {code} リダイレクト先: {newurl}")
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    opener = urllib.request.build_opener(LogRedirectHandler())
+
+    def try_get(url):
         req = urllib.request.Request(url, headers={
             "Authorization": auth_header,
             "User-Agent": "Mozilla/5.0",
         })
-        with urllib.request.urlopen(req, timeout=20) as res:
+        with opener.open(req, timeout=20) as res:
             return res.read().decode("utf-8", errors="ignore")
 
-    # ── 1. サービスドキュメントからエントリ投稿URLを自動取得 ──
+    # ── 1. 複数のエンドポイント候補でサービスドキュメントを探す ──
+    blog_id = JUGEM_USER  # ブログIDとしてユーザー名を流用
+    candidates = [
+        f"https://nadaryu.jugem.cc/atom/entry/",
+        f"https://nadaryu.jugem.cc/atom/",
+        f"https://jugem.jp/atom/{blog_id}/entry/",
+        f"https://jugem.jp/atom/{blog_id}/",
+        f"https://jugem.jp/api/atom/{blog_id}/entry/",
+    ]
     collection_url = None
-    for svc_url in [JUGEM_ATOM_URL, f"https://nadaryu.jugem.cc/atom/"]:
+    for svc_url in candidates:
         try:
-            svc_doc = api_get(svc_url)
-            print(f"  → サービスドキュメント取得: {svc_url}")
-            print(f"  → 先頭500字: {svc_doc[:500]}")
-            # <collection href="..."> を探す
+            svc_doc = try_get(svc_url)
+            print(f"  → OK: {svc_url}")
+            print(f"  → 先頭300字: {svc_doc[:300]}")
             m = re.search(r'<collection[^>]+href=["\']([^"\']+)["\']', svc_doc)
             if m:
                 collection_url = m.group(1)
                 print(f"  → collectionURL: {collection_url}")
-                break
+            else:
+                # GETが成功したURLにそのままPOSTを試みる
+                collection_url = svc_url
+            break
         except urllib.error.HTTPError as e:
             print(f"  → {svc_url} → HTTP {e.code}")
         except Exception as e:
             print(f"  → {svc_url} → エラー: {e}")
 
-    # サービスドキュメントで見つからなければ既知URLを試す
     if not collection_url:
-        collection_url = JUGEM_ATOM_URL
-        print(f"  → サービスドキュメント未取得。フォールバック: {collection_url}")
+        collection_url = candidates[0]
+        print(f"  → 全候補が失敗。フォールバック: {collection_url}")
 
-    # ── 2. Atom エントリを投稿 ──
+    # ── 2. Atom エントリを POST ──
     now_str = datetime.now(JST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
     atom_entry = f"""<?xml version="1.0" encoding="UTF-8"?>
 <entry xmlns="http://www.w3.org/2005/Atom">
@@ -187,7 +203,7 @@ def post_to_jugem(title: str, body: str) -> str:
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=20) as res:
+        with opener.open(req, timeout=20) as res:
             resp_body = res.read().decode("utf-8", errors="ignore")
             print(f"  → AtomPub POST ステータス: {res.status}")
             print(f"  → レスポンス先頭300字: {resp_body[:300]}")
