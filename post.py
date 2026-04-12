@@ -7,6 +7,7 @@ import os
 import json
 import urllib.request
 import urllib.error
+import re
 import urllib.parse
 import http.cookiejar
 from datetime import datetime, timezone, timedelta
@@ -151,35 +152,64 @@ def post_to_jugem(title: str, body: str) -> str:
         res = opener.open(req, timeout=20)
         return res, res.read().decode("utf-8", errors="ignore")
 
-    # ── 1. ログインページ取得（セッションCookie発行）──
-    login_url = f"{JUGEM_BASE}/manage/?mode=login"
-    get(login_url)
+    # ── 1. ログインページ取得（jugem.jp にリダイレクトされる可能性あり）──
+    manage_login_url = f"{JUGEM_BASE}/manage/?mode=login"
+    res, html = get(manage_login_url)
+    actual_login_url = res.url  # リダイレクト後の実際のURL
+    print(f"  → ログインページURL: {actual_login_url}")
 
-    # ── 2. ログイン POST（Refererをログインページに設定）──
-    res, html = post(login_url, {
+    # ── 2. ログインフォームの action と hidden フィールドを取得 ──
+    # <form ... action="..."> を探す
+    form_action_m = re.search(
+        r'<form[^>]+action=["\']([^"\']+)["\']', html, re.IGNORECASE
+    )
+    form_action = form_action_m.group(1) if form_action_m else actual_login_url
+    # 相対URLの場合は絶対URLに変換
+    if form_action.startswith("/"):
+        p = urllib.parse.urlparse(actual_login_url)
+        form_action = f"{p.scheme}://{p.netloc}{form_action}"
+    print(f"  → フォームaction: {form_action}")
+
+    # hidden フィールド収集
+    login_hidden: dict[str, str] = {}
+    for m in re.finditer(
+        r'<input[^>]+type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
+        html, re.IGNORECASE
+    ):
+        login_hidden[m.group(1)] = m.group(2)
+    for m in re.finditer(
+        r'<input[^>]+name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\']',
+        html, re.IGNORECASE
+    ):
+        login_hidden[m.group(1)] = m.group(2)
+
+    # ── 3. ログイン POST ──
+    # フィールド名はサイトによって異なるため両方試す
+    login_params = {
+        **login_hidden,
         "jugem_id": JUGEM_USER,
+        "user_id":  JUGEM_USER,   # jugem.jp 側のフィールド名候補
         "password": JUGEM_PASS,
         "mode":     "login",
         "action":   "login",
-    }, referer=login_url)
+    }
+    res, html = post(form_action, login_params, referer=actual_login_url)
     print(f"  → ログイン後URL: {res.url}")
 
-    # ログイン成功確認（管理トップへリダイレクトされているはず）
+    # ログイン成功確認
     if "ログアウト" not in html and "logout" not in html.lower():
-        # ダッシュボードを明示取得して再確認
-        _, html2 = get(f"{JUGEM_BASE}/manage/?mode=top", referer=login_url)
+        _, html2 = get(f"{JUGEM_BASE}/manage/?mode=top", referer=res.url)
         if "ログアウト" not in html2 and "logout" not in html2.lower():
+            print(f"  → ログイン失敗時HTML先頭: {html[:500]}")
             raise RuntimeError("ログイン失敗。JUGEM_USER / JUGEM_PASS を確認してください。")
         html = html2
     print("  → ログイン成功")
 
-    # ── 3. 記事投稿フォームページ取得（hidden フィールド収集）──
+    # ── 4. 記事投稿フォームページ取得（hidden フィールド収集）──
     top_url = f"{JUGEM_BASE}/manage/?mode=top"
     entry_top_url = f"{JUGEM_BASE}/manage/?mode=entry"
     _, entry_html = get(entry_top_url, referer=top_url)
 
-    # hidden フィールドを抽出して hidden_params に格納
-    import re
     hidden_params: dict[str, str] = {}
     for m in re.finditer(
         r'<input[^>]+type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
@@ -193,7 +223,7 @@ def post_to_jugem(title: str, body: str) -> str:
     ):
         hidden_params[m.group(1)] = m.group(2)
 
-    # ── 4. 記事投稿 POST ──
+    # ── 5. 記事投稿 POST ──
     post_params = {
         **hidden_params,
         "mode":    "entry",
