@@ -143,7 +143,8 @@ def post_to_jugem(title: str, body: str) -> str:
             return res.read().decode("utf-8", errors="ignore"), res.geturl()
 
     def do_post(url, params, extra_headers=None):
-        data = urllib.parse.urlencode(params).encode()
+        # JUGEM 管理画面は Shift-JIS のフォームデータを期待している
+        data = urllib.parse.urlencode(params, encoding='shift_jis').encode('ascii')
         h = {
             "User-Agent": UA,
             "Content-Type": "application/x-www-form-urlencoded",
@@ -253,9 +254,9 @@ def post_to_jugem(title: str, body: str) -> str:
         "title":       title,
         "description": body,
         "sequel":      "",
-        "state":       "1",
+        "state":       "0",   # 0=公開 の可能性（1=下書きかもしれない）
         "set_date":    "0",
-        "action":      "insert",   # 明示的に insert を指定
+        "action":      "insert",
     }
     print(f"  → POST params keys: {list(insert_params.keys())}")
     done_html, done_final = do_post(
@@ -267,14 +268,15 @@ def post_to_jugem(title: str, body: str) -> str:
     all_eids = re.findall(r'eid=(\d+)', done_html)
     print(f"  → done_html eid 一覧: {all_eids[:10]}")
 
-    # POST 後に管理トップで最新 eid を確認（増えていれば成功）
+    # POST 後に管理トップ・全記事リストで確認
     top_html, _ = do_get(f"{manage_base}?mode=top")
     top_eids = re.findall(r'eid=(\d+)', top_html)
     print(f"  → manage top の eid 一覧: {top_eids[:10]}")
-    # 応答HTML内のエラーメッセージ候補
-    err_candidates = re.findall(r'<[^>]+class=["\'][^"\']*(?:error|alert|warn)[^"\']*["\'][^>]*>([^<]{3,60})', done_html, re.IGNORECASE)
-    if err_candidates:
-        print(f"  → エラーDiv候補: {err_candidates[:5]}")
+
+    # 全記事リスト（下書き含む）を確認
+    entry_list_html, _ = do_get(f"{manage_base}?mode=entry")
+    entry_eids = re.findall(r'eid=(\d+)', entry_list_html)
+    print(f"  → entry list の eid 一覧: {entry_eids[:15]}")
 
     # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
     eid_m = re.search(r'eid=(\d+)', done_final)
