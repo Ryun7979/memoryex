@@ -18,7 +18,7 @@ JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
-JUGEM_XMLRPC_URL = "http://nadaryu.jugem.cc/admin/xmlrpc.php"
+JUGEM_XMLRPC_URL = "http://nadaryu.jugem.cc/manage/xmlrpc.php"
 JUGEM_BLOG_ID = "1"
 GEMINI_MODEL = "gemini-2.5-flash"
 # ────────────────────────────────────────────────────────
