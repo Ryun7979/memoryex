@@ -225,8 +225,6 @@ def post_to_jugem(title: str, body: str) -> str:
         else: continue
         hidden[name] = value
 
-    print(f"  → hidden fields: {list(hidden.keys())}")
-
     # select 要素のデフォルト値を収集（category_id など）
     selects = {}
     for m in re.finditer(
@@ -241,8 +239,6 @@ def post_to_jugem(title: str, body: str) -> str:
             # なければ最初のオプション
             sel_m = re.search(r'<option[^>]+value=["\']([^"\']*)["\']', sel_body, re.IGNORECASE)
         selects[sel_name] = sel_m.group(1) if sel_m else ""
-    print(f"  → select fields: {selects}")
-
     # ── 4. 全フィールド + action=insert で POST ──
     insert_params = {
         **hidden,
@@ -254,30 +250,15 @@ def post_to_jugem(title: str, body: str) -> str:
         "title":       title,
         "description": body,
         "sequel":      "",
-        "state":       "0",   # 0=公開 の可能性（1=下書きかもしれない）
+        "state":       "0",   # 0=公開, 1=下書き
         "set_date":    "0",
         "action":      "insert",
     }
-    print(f"  → POST params keys: {list(insert_params.keys())}")
     done_html, done_final = do_post(
         form_action,
         insert_params,
         extra_headers={"Referer": entry_final},
     )
-    print(f"  → 公開後URL: {done_final}")
-    all_eids = re.findall(r'eid=(\d+)', done_html)
-    print(f"  → done_html eid 一覧: {all_eids[:10]}")
-
-    # POST 後に管理トップ・全記事リストで確認
-    top_html, _ = do_get(f"{manage_base}?mode=top")
-    top_eids = re.findall(r'eid=(\d+)', top_html)
-    print(f"  → manage top の eid 一覧: {top_eids[:10]}")
-
-    # 全記事リスト（下書き含む）を確認
-    entry_list_html, _ = do_get(f"{manage_base}?mode=entry")
-    entry_eids = re.findall(r'eid=(\d+)', entry_list_html)
-    print(f"  → entry list の eid 一覧: {entry_eids[:15]}")
-
     # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
     eid_m = re.search(r'eid=(\d+)', done_final)
     if not eid_m:
