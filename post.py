@@ -226,27 +226,33 @@ def post_to_jugem(title: str, body: str) -> str:
 
     print(f"  → hidden fields: {list(hidden.keys())}")
 
-    # submitEntry 関数の完全な内容を取得
-    fn_start = entry_html.find('function submitEntry')
-    if fn_start >= 0:
-        print(f"  → submitEntry JS:\n{entry_html[fn_start:fn_start+600]}")
-    else:
-        print("  ⚠ submitEntry NOT FOUND")
+    # select 要素のデフォルト値を収集（category_id など）
+    selects = {}
+    for m in re.finditer(
+        r'<select[^>]+name=["\']([^"\']+)["\'][^>]*>(.*?)</select>',
+        entry_html, re.IGNORECASE | re.DOTALL
+    ):
+        sel_name = m.group(1)
+        sel_body = m.group(2)
+        # selected="selected" のオプションを優先
+        sel_m = re.search(r'<option[^>]+value=["\']([^"\']*)["\'][^>]*selected', sel_body, re.IGNORECASE)
+        if not sel_m:
+            # なければ最初のオプション
+            sel_m = re.search(r'<option[^>]+value=["\']([^"\']*)["\']', sel_body, re.IGNORECASE)
+        selects[sel_name] = sel_m.group(1) if sel_m else ""
+    print(f"  → select fields: {selects}")
 
-    # form の enctype を確認
-    enctype_m = re.search(r'<form[^>]+enctype=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
-    print(f"  → form enctype: {enctype_m.group(1) if enctype_m else 'not set (default: urlencoded)'}")
-
-    # ── 4. action パラメータなしで POST（submitEntry(form,1) 相当）──
+    # ── 4. action パラメータなしで POST（select フィールドも含む）──
     insert_params = {
         **hidden,
+        **selects,           # category_id など select 要素を全て含む
         "title":       title,
         "description": body,
         "sequel":      "",
         "state":       "1",
         "set_date":    "0",
     }
-    print(f"  → POST URL: {form_action}")
+    print(f"  → POST params keys: {list(insert_params.keys())}")
     done_html, done_final = do_post(
         form_action,
         insert_params,
@@ -256,13 +262,10 @@ def post_to_jugem(title: str, body: str) -> str:
     all_eids = re.findall(r'eid=(\d+)', done_html)
     print(f"  → eid 一覧: {all_eids[:10]}")
 
-    # POST 後に管理トップを確認（下書き保存の有無）
+    # POST 後に管理トップで最新 eid を確認
     top_html, _ = do_get(f"{manage_base}?mode=top")
     top_eids = re.findall(r'eid=(\d+)', top_html)
     print(f"  → manage top の eid 一覧: {top_eids[:10]}")
-    # 管理トップの最新記事タイトルを探す
-    for m in re.finditer(r'(?:テスト投稿|テスト|test)[^<]{0,50}', top_html, re.IGNORECASE):
-        print(f"  → top にテスト記事: {m.group(0)[:60]}")
 
     # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
     eid_m = re.search(r'eid=(\d+)', done_final)
