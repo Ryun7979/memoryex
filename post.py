@@ -190,15 +190,27 @@ def post_to_jugem(title: str, body: str) -> str:
         raise RuntimeError(f"JUGEM ログイン失敗（ログインページに留まった）: {final}")
     print(f"  → ログイン成功: {final}")
 
-    # ── 3. 記事投稿フォームを取得 ──
+    # ── 3. 記事投稿フォームを取得（シンプルビュー）──
     manage_base = final.split("?")[0]  # https://nadaryu.jugem.cc/manage/
-    entry_html, entry_final = do_get(f"{manage_base}?mode=entry")
+    # view=rich はリッチテキストエディタ（JS依存）のため view=simple を使用
+    entry_html, entry_final = do_get(f"{manage_base}?mode=entry&view=simple")
     if "jugem.jp/login" in entry_final:
         raise RuntimeError(f"セッション未確立: {entry_final}")
+    print(f"  → 投稿フォームURL: {entry_final}")
 
-    # フォームの action / hidden fields を収集
+    # フォームの action を取得
     form_action_m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
+    print(f"  → form action raw: {form_action_m.group(1) if form_action_m else 'NOT FOUND'}")
     form_action = urllib.parse.urljoin(entry_final, form_action_m.group(1) if form_action_m else "")
+
+    # submit ボタンの name/value を確認
+    buttons = re.findall(
+        r'<input[^>]+type=["\']submit["\'][^>]*>|<button[^>]*>.*?</button>',
+        entry_html, re.IGNORECASE | re.DOTALL
+    )
+    print(f"  → submit buttons: {buttons[:5]}")
+
+    # hidden fields を収集
     hidden = {}
     for m in re.finditer(
         r'<input[^>]+(?:type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']'
@@ -277,7 +289,13 @@ def post_to_jugem(title: str, body: str) -> str:
         extra_headers={"Referer": conf_final},
     )
     print(f"  → 公開後URL: {done_final}")
-    print(f"  → 公開後レスポンス (1000字): {done_html[:1000]}")
+    # エラーメッセージを探す
+    err_m = re.search(r'(?:error|エラー|失敗|invalid|必須)[^<]{0,100}', done_html, re.IGNORECASE)
+    print(f"  → エラー検出: {err_m.group(0) if err_m else 'なし'}")
+    # HTML 内の全 eid を列挙
+    all_eids = re.findall(r'eid=(\d+)', done_html)
+    print(f"  → done_html 内の eid 一覧: {all_eids[:10]}")
+    print(f"  → 公開後レスポンス (2000字): {done_html[500:2500]}")
 
     # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
     eid_m = re.search(r'eid=(\d+)', done_final)
