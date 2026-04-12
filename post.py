@@ -225,33 +225,44 @@ def post_to_jugem(title: str, body: str) -> str:
         hidden[name] = value
 
     print(f"  → hidden fields: {list(hidden.keys())}")
-    if "csrf_token" not in hidden:
-        print("  ⚠ csrf_token が取得できませんでした")
+
+    # submitEntry 関数の完全な内容を取得
+    fn_start = entry_html.find('function submitEntry')
+    if fn_start >= 0:
+        print(f"  → submitEntry JS:\n{entry_html[fn_start:fn_start+600]}")
+    else:
+        print("  ⚠ submitEntry NOT FOUND")
+
+    # form の enctype を確認
+    enctype_m = re.search(r'<form[^>]+enctype=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
+    print(f"  → form enctype: {enctype_m.group(1) if enctype_m else 'not set (default: urlencoded)'}")
 
     # ── 4. action パラメータなしで POST（submitEntry(form,1) 相当）──
-    # JUGEM の submitEntry(obj, state) は state をセットして form.submit() するだけ
-    # action パラメータは不要
     insert_params = {
         **hidden,
         "title":       title,
         "description": body,
         "sequel":      "",
-        "state":       "1",   # 1=公開
-        "set_date":    "0",   # 0=現在時刻を自動使用
+        "state":       "1",
+        "set_date":    "0",
     }
     print(f"  → POST URL: {form_action}")
-    print(f"  → params keys: {list(insert_params.keys())}")
     done_html, done_final = do_post(
         form_action,
         insert_params,
         extra_headers={"Referer": entry_final},
     )
     print(f"  → 公開後URL: {done_final}")
-    # 日本語エラー・成功メッセージを検索
-    for m in re.finditer(r'(?:エラー|失敗|成功|登録完了|投稿完了)[^<]{0,80}', done_html):
-        print(f"  → メッセージ: {m.group(0)[:80]}")
     all_eids = re.findall(r'eid=(\d+)', done_html)
-    print(f"  → eid 一覧（最大10件）: {all_eids[:10]}")
+    print(f"  → eid 一覧: {all_eids[:10]}")
+
+    # POST 後に管理トップを確認（下書き保存の有無）
+    top_html, _ = do_get(f"{manage_base}?mode=top")
+    top_eids = re.findall(r'eid=(\d+)', top_html)
+    print(f"  → manage top の eid 一覧: {top_eids[:10]}")
+    # 管理トップの最新記事タイトルを探す
+    for m in re.finditer(r'(?:テスト投稿|テスト|test)[^<]{0,50}', top_html, re.IGNORECASE):
+        print(f"  → top にテスト記事: {m.group(0)[:60]}")
 
     # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
     eid_m = re.search(r'eid=(\d+)', done_final)
