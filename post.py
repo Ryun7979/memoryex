@@ -116,7 +116,45 @@ def format_with_gemini(messages: list[str]) -> dict:
 
 def post_to_jugem(title: str, body: str) -> str:
     """JUGEM AtomPub API で記事を投稿する（Basic認証）。"""
+    import re
 
+    credentials = base64.b64encode(
+        f"{JUGEM_USER}:{JUGEM_PASS}".encode()
+    ).decode()
+    auth_header = f"Basic {credentials}"
+
+    def api_get(url):
+        req = urllib.request.Request(url, headers={
+            "Authorization": auth_header,
+            "User-Agent": "Mozilla/5.0",
+        })
+        with urllib.request.urlopen(req, timeout=20) as res:
+            return res.read().decode("utf-8", errors="ignore")
+
+    # ── 1. サービスドキュメントからエントリ投稿URLを自動取得 ──
+    collection_url = None
+    for svc_url in [JUGEM_ATOM_URL, f"https://nadaryu.jugem.cc/atom/"]:
+        try:
+            svc_doc = api_get(svc_url)
+            print(f"  → サービスドキュメント取得: {svc_url}")
+            print(f"  → 先頭500字: {svc_doc[:500]}")
+            # <collection href="..."> を探す
+            m = re.search(r'<collection[^>]+href=["\']([^"\']+)["\']', svc_doc)
+            if m:
+                collection_url = m.group(1)
+                print(f"  → collectionURL: {collection_url}")
+                break
+        except urllib.error.HTTPError as e:
+            print(f"  → {svc_url} → HTTP {e.code}")
+        except Exception as e:
+            print(f"  → {svc_url} → エラー: {e}")
+
+    # サービスドキュメントで見つからなければ既知URLを試す
+    if not collection_url:
+        collection_url = JUGEM_ATOM_URL
+        print(f"  → サービスドキュメント未取得。フォールバック: {collection_url}")
+
+    # ── 2. Atom エントリを投稿 ──
     now_str = datetime.now(JST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
     atom_entry = f"""<?xml version="1.0" encoding="UTF-8"?>
 <entry xmlns="http://www.w3.org/2005/Atom">
@@ -128,16 +166,12 @@ def post_to_jugem(title: str, body: str) -> str:
   </app:control>
 </entry>"""
 
-    credentials = base64.b64encode(
-        f"{JUGEM_USER}:{JUGEM_PASS}".encode()
-    ).decode()
-
     req = urllib.request.Request(
-        JUGEM_ATOM_URL,
+        collection_url,
         data=atom_entry.encode("utf-8"),
         headers={
             "Content-Type": "application/atom+xml; charset=utf-8",
-            "Authorization": f"Basic {credentials}",
+            "Authorization": auth_header,
             "User-Agent": "Mozilla/5.0",
         },
         method="POST",
@@ -146,7 +180,7 @@ def post_to_jugem(title: str, body: str) -> str:
     try:
         with urllib.request.urlopen(req, timeout=20) as res:
             resp_body = res.read().decode("utf-8", errors="ignore")
-            print(f"  → AtomPub ステータス: {res.status}")
+            print(f"  → AtomPub POST ステータス: {res.status}")
             print(f"  → レスポンス先頭300字: {resp_body[:300]}")
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="ignore")
@@ -154,8 +188,6 @@ def post_to_jugem(title: str, body: str) -> str:
             f"AtomPub 投稿失敗 HTTP {e.code}: {err_body[:300]}"
         )
 
-    # Location ヘッダーから記事ID を取り出す
-    import re
     eid_m = re.search(r'eid=(\d+)|/entry/(\d+)', resp_body)
     return eid_m.group(1) or eid_m.group(2) if eid_m else "ok"
 
