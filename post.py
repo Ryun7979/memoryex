@@ -154,7 +154,15 @@ def post_to_jugem(title: str, body: str) -> str:
             h.update(extra_headers)
         req = urllib.request.Request(url, data=data, headers=h, method="POST")
         with opener.open(req, timeout=20) as res:
-            return res.read().decode("utf-8", errors="ignore"), res.geturl()
+            raw = res.read()
+            ct = res.headers.get("Content-Type", "")
+            if "shift_jis" in ct.lower() or "shift-jis" in ct.lower():
+                text = raw.decode("shift_jis", errors="replace")
+            elif "euc" in ct.lower():
+                text = raw.decode("euc-jp", errors="replace")
+            else:
+                text = raw.decode("utf-8", errors="ignore")
+            return text, res.geturl()
 
     # ── 1. jugem.jp/login を GET して CSRF トークンを取得 ──
     login_html, _ = do_get("https://jugem.jp/login")
@@ -225,43 +233,39 @@ def post_to_jugem(title: str, body: str) -> str:
     # 現在のJST日時をフォームに明示的にセット
     now = datetime.now(JST)
 
-    # ボタンの onclick 属性を確認（JS がどの action を渡しているか）
-    button_tags = re.findall(r'<input[^>]+type=["\']button["\'][^>]*>', entry_html, re.IGNORECASE)
-    for b in button_tags:
-        onclick = re.search(r'onclick=["\']([^"\']{0,200})["\']', b, re.IGNORECASE)
-        val     = re.search(r'value=["\']([^"\']+)["\']', b, re.IGNORECASE)
-        print(f"  → button value={val.group(1) if val else '?'} onclick={onclick.group(1) if onclick else '?'}")
-
+    # submitEntry JS 関数の定義を抽出
+    fn_m = re.search(r'function\s+submitEntry\s*\([^)]*\)\s*\{[^}]{0,500}\}', entry_html, re.DOTALL)
+    print(f"  → submitEntry: {fn_m.group(0) if fn_m else 'NOT FOUND'}")
+    # state hidden field のデフォルト値
+    state_m = re.search(r'<input[^>]+name=["\']state["\'][^>]+value=["\']([^"\']*)["\']', entry_html, re.IGNORECASE)
+    if not state_m:
+        state_m = re.search(r'<input[^>]+value=["\']([^"\']*)["\'][^>]+name=["\']state["\']', entry_html, re.IGNORECASE)
+    print(f"  → state default value: {state_m.group(1) if state_m else 'NOT FOUND'}")
     print(f"  → hidden fields: {list(hidden.keys())}")
 
-    # ── 4. action を URL パラメータとして渡して投稿 ──
-    # JUGEM は type=button の JS onclick でフォームの action を URL に付加して送信するため
-    # POST ボディではなく URL クエリに action=insert を含める
-
-    insert_url = form_action.rstrip("&") + "&action=insert"
-
+    # ── 4. action パラメータなしで直接 POST（JS の form.submit() 相当）──
     insert_params = {
         **hidden,
         "title":       title,
         "description": body,
+        "sequel":      "",
         "state":       "1",
-        "set_date":    "0",   # 0=自動（現在時刻）
+        "set_date":    "0",
     }
-    print(f"  → insert URL: {insert_url}")
-    print(f"  → insert params keys: {list(insert_params.keys())}")
+    print(f"  → POST URL: {form_action}")
+    print(f"  → params keys: {list(insert_params.keys())}")
     done_html, done_final = do_post(
-        insert_url,
+        form_action,
         insert_params,
         extra_headers={"Referer": entry_final},
     )
     print(f"  → 公開後URL: {done_final}")
-    for m in re.finditer(r'(?:エラー|失敗|invalid|必須|required)[^<]{0,150}', done_html, re.IGNORECASE):
-        print(f"  → エラー候補: {m.group(0)[:100]}")
+    # 日本語メッセージを検索（do_post が Shift-JIS を正しくデコードするようになった）
+    for m in re.finditer(r'(?:エラー|失敗|必須|入力|タイトル|本文|成功|登録)[^<]{0,100}', done_html):
+        print(f"  → メッセージ: {m.group(0)[:80]}")
     all_eids = re.findall(r'eid=(\d+)', done_html)
-    print(f"  → done_html 内の eid 一覧: {all_eids[:10]}")
-    if done_final != insert_url and done_final != form_action:
-        print(f"  → URL変化あり（成功の可能性）: {done_final}")
-    print(f"  → 公開後レスポンス (2000字): {done_html[200:2200]}")
+    print(f"  → eid 一覧: {all_eids[:10]}")
+    print(f"  → レスポンス先頭: {done_html[:500]}")
 
     # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
     eid_m = re.search(r'eid=(\d+)', done_final)
