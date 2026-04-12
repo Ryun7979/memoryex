@@ -225,77 +225,54 @@ def post_to_jugem(title: str, body: str) -> str:
     # 現在のJST日時をフォームに明示的にセット
     now = datetime.now(JST)
 
-    # ── 4. 確認ページを経由して記事を公開 ──
-    # JUGEM は confirm → insert の2段階。confirm だけでは下書き状態。
-    post_params = {
-        **hidden,
-        "title":       title,
-        "description": body,
-        "mode":        "write",
-        "action":      "confirm",
-        "state":       "1",          # 1=公開, 2=下書き
-        "year":        str(now.year),
-        "month":       str(now.month).zfill(2),
-        "day":         str(now.day).zfill(2),
-        "hour":        str(now.hour).zfill(2),
-        "minute":      str(now.minute).zfill(2),
-    }
-    print(f"  → 確認ページ送信: {form_action}")
+    # フォーム内の textarea 名を確認
+    textarea_names = re.findall(r'<textarea[^>]+name=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
+    print(f"  → textarea names: {textarea_names}")
+    # 全 input 要素の name/type を確認
+    all_inputs = re.findall(r'<input[^>]+>', entry_html, re.IGNORECASE)
+    input_info = [(re.search(r'name=["\']([^"\']+)["\']', i, re.IGNORECASE) or type('', (), {'group': lambda *a: '?'}))
+                  .group(1) + ':' +
+                  (re.search(r'type=["\']([^"\']+)["\']', i, re.IGNORECASE) or type('', (), {'group': lambda *a: 'text'}))
+                  .group(1) for i in all_inputs]
+    print(f"  → all inputs: {input_info}")
     print(f"  → hidden fields: {list(hidden.keys())}")
-    conf_html, conf_final = do_post(
-        form_action,
-        post_params,
-        extra_headers={"Referer": entry_final},
-    )
-    print(f"  → 確認後URL: {conf_final}")
-    print(f"  → 確認ページ冒頭: {conf_html[:500]}")
 
-    # 確認ページの hidden fields を取得して insert（公開）
-    # name/value どちらが先でも取得できるよう両パターン対応
-    conf_hidden = {}
-    for m in re.finditer(
-        r'<input[^>]+(?:type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']'
-        r'|name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\']'
-        r'|name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\'][^>]*type=["\']hidden["\']'
-        r'|value=["\']([^"\']*)["\'][^>]*name=["\']([^"\']+)["\'][^>]*(?:type=["\']hidden["\'])?)',
-        conf_html, re.IGNORECASE
-    ):
-        groups = m.groups()
-        # (name, value) のペアを各グループから取得
-        if groups[0]:   name, value = groups[0], groups[1]
-        elif groups[2]: name, value = groups[2], groups[3]
-        elif groups[4]: name, value = groups[4], groups[5]
-        elif groups[7]: name, value = groups[7], groups[6]
-        else: continue
-        if name:
-            conf_hidden[name] = value
+    # ── 4. 直接 action=insert で投稿（confirm をスキップ）──
+    # textarea 名の候補: description, body, content, text
+    body_field = textarea_names[0] if textarea_names else "description"
+    print(f"  → body field: {body_field}")
 
-    # type=hidden 以外の input も含めて name/value を取得（確認ページは hidden に集約されるが念のため）
-    for m in re.finditer(
-        r'<input[^>]+name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
-        conf_html, re.IGNORECASE
-    ):
-        n, v = m.group(1), m.group(2)
-        if n not in conf_hidden:
-            conf_hidden[n] = v
-
-    print(f"  → confirm hidden fields: {list(conf_hidden.keys())}")
-    print(f"  → csrf_token in conf: {conf_hidden.get('csrf_token', 'MISSING')[:20] if conf_hidden.get('csrf_token') else 'MISSING'}")
-    conf_hidden["state"] = "1"
-    print(f"  → 公開送信 (action=insert): {form_action}")
+    insert_params = {
+        **hidden,
+        "title":     title,
+        body_field:  body,
+        "mode":      "write",
+        "action":    "insert",
+        "state":     "1",
+        "year":      str(now.year),
+        "month":     str(now.month).zfill(2),
+        "day":       str(now.day).zfill(2),
+        "hour":      str(now.hour).zfill(2),
+        "minute":    str(now.minute).zfill(2),
+        "set_date":  "1",
+    }
+    print(f"  → 直接 insert 送信: {form_action}")
     done_html, done_final = do_post(
         form_action,
-        {**conf_hidden, "title": title, "description": body, "mode": "write", "action": "insert"},
-        extra_headers={"Referer": conf_final},
+        insert_params,
+        extra_headers={"Referer": entry_final},
     )
     print(f"  → 公開後URL: {done_final}")
-    # エラーメッセージを探す
-    err_m = re.search(r'(?:error|エラー|失敗|invalid|必須)[^<]{0,100}', done_html, re.IGNORECASE)
-    print(f"  → エラー検出: {err_m.group(0) if err_m else 'なし'}")
+    # エラーメッセージを探す（JS error ハンドラを除く）
+    for m in re.finditer(r'(?:エラー|失敗|invalid|必須|required)[^<]{0,150}', done_html, re.IGNORECASE):
+        print(f"  → エラー候補: {m.group(0)[:100]}")
     # HTML 内の全 eid を列挙
     all_eids = re.findall(r'eid=(\d+)', done_html)
     print(f"  → done_html 内の eid 一覧: {all_eids[:10]}")
-    print(f"  → 公開後レスポンス (2000字): {done_html[500:2500]}")
+    # URL が変わった場合は成功の可能性
+    if done_final != form_action:
+        print(f"  → URL変化あり（成功の可能性）: {done_final}")
+    print(f"  → 公開後レスポンス (2000字): {done_html[200:2200]}")
 
     # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
     eid_m = re.search(r'eid=(\d+)', done_final)
