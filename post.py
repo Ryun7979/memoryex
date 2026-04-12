@@ -6,10 +6,11 @@ Telegram の今日のメモを Gemini で整形して JUGEM ブログに投稿�
 import os
 import re
 import json
-import base64
 import time
+import http.cookiejar
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 
 # ── 設定 ────────────────────────────────────────────────
@@ -125,104 +126,194 @@ def format_with_gemini(messages: list[str]) -> dict:
 
 
 def post_to_jugem(title: str, body: str) -> str:
-    """JUGEM AtomPub API で記事を投稿する（Basic認証）。"""
-    credentials = base64.b64encode(
-        f"{JUGEM_USER}:{JUGEM_PASS}".encode()
-    ).decode()
-    auth_header = f"Basic {credentials}"
+    """JUGEM ブログ管理画面フォームで記事を投稿する。"""
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 
-    # リダイレクトを追わずに Location ヘッダーを記録するハンドラ
-    class LogRedirectHandler(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            print(f"  → {code} リダイレクト先: {newurl}")
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
+    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+          "AppleWebKit/537.36 (KHTML, like Gecko) "
+          "Chrome/124.0.0.0 Safari/537.36")
 
-    opener = urllib.request.build_opener(LogRedirectHandler())
-
-    def try_get(url):
+    def do_get(url):
         req = urllib.request.Request(url, headers={
-            "Authorization": auth_header,
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": "ja,en;q=0.9",
         })
         with opener.open(req, timeout=20) as res:
-            return res.read().decode("utf-8", errors="ignore")
+            return res.read().decode("utf-8", errors="ignore"), res.geturl()
 
-    # ── 1. 複数のエンドポイント候補でサービスドキュメントを探す ──
-    blog_id = JUGEM_USER  # ブログIDとしてユーザー名を流用
-    candidates = [
-        f"https://nadaryu.jugem.cc/atom/entry/",
-        f"https://nadaryu.jugem.cc/atom/",
-        f"https://jugem.jp/atom/{blog_id}/entry/",
-        f"https://jugem.jp/atom/{blog_id}/",
-        f"https://jugem.jp/api/atom/{blog_id}/entry/",
-    ]
-    collection_url = None
-    for svc_url in candidates:
-        try:
-            svc_doc = try_get(svc_url)
-            print(f"  → OK: {svc_url}")
-            print(f"  → 先頭300字: {svc_doc[:300]}")
-            m = re.search(r'<collection[^>]+href=["\']([^"\']+)["\']', svc_doc)
-            if m:
-                collection_url = m.group(1)
-                print(f"  → collectionURL: {collection_url}")
-            else:
-                # GETが成功したURLにそのままPOSTを試みる
-                collection_url = svc_url
-            break
-        except urllib.error.HTTPError as e:
-            print(f"  → {svc_url} → HTTP {e.code}")
-        except Exception as e:
-            print(f"  → {svc_url} → エラー: {e}")
-
-    if not collection_url:
-        collection_url = candidates[0]
-        print(f"  → 全候補が失敗。フォールバック: {collection_url}")
-
-    # ── 2. Atom エントリを POST ──
-    now_str = datetime.now(JST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
-    atom_entry = f"""<?xml version="1.0" encoding="UTF-8"?>
-<entry xmlns="http://www.w3.org/2005/Atom">
-  <title>{_xml_escape(title)}</title>
-  <content type="html">{_xml_escape(body)}</content>
-  <updated>{now_str}</updated>
-  <app:control xmlns:app="http://www.w3.org/2007/app">
-    <app:draft>no</app:draft>
-  </app:control>
-</entry>"""
-
-    req = urllib.request.Request(
-        collection_url,
-        data=atom_entry.encode("utf-8"),
-        headers={
-            "Content-Type": "application/atom+xml; charset=utf-8",
-            "Authorization": auth_header,
-            "User-Agent": "Mozilla/5.0",
-        },
-        method="POST",
-    )
-
-    try:
+    def do_post(url, params, extra_headers=None):
+        data = urllib.parse.urlencode(params).encode()
+        h = {
+            "User-Agent": UA,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": "ja,en;q=0.9",
+        }
+        if extra_headers:
+            h.update(extra_headers)
+        req = urllib.request.Request(url, data=data, headers=h, method="POST")
         with opener.open(req, timeout=20) as res:
-            resp_body = res.read().decode("utf-8", errors="ignore")
-            print(f"  → AtomPub POST ステータス: {res.status}")
-            print(f"  → レスポンス先頭300字: {resp_body[:300]}")
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(
-            f"AtomPub 投稿失敗 HTTP {e.code}: {err_body[:300]}"
-        )
+            return res.read().decode("utf-8", errors="ignore"), res.geturl()
 
-    eid_m = re.search(r'eid=(\d+)|/entry/(\d+)', resp_body)
-    return eid_m.group(1) or eid_m.group(2) if eid_m else "ok"
+    def do_post_json(url, payload, referer=None):
+        data = json.dumps(payload).encode()
+        h = {
+            "User-Agent": UA,
+            "Content-Type": "application/json",
+            "Accept": "application/json, */*",
+            "Accept-Language": "ja,en;q=0.9",
+        }
+        if referer:
+            h["Referer"] = referer
+        req = urllib.request.Request(url, data=data, headers=h, method="POST")
+        with opener.open(req, timeout=20) as res:
+            return res.read().decode("utf-8", errors="ignore"), res.geturl()
 
+    # ── 1. manage 画面に直接 POST してログインを試みる（旧方式） ──
+    manage_login_url = f"https://nadaryu.jugem.cc/manage/"
+    print(f"  → 管理画面直接ログイン試行: {manage_login_url}")
+    try:
+        html, final = do_post(manage_login_url, {
+            "blog_login_id": JUGEM_USER,
+            "blog_password":  JUGEM_PASS,
+            "mode": "login",
+        }, extra_headers={"Referer": manage_login_url})
+        print(f"  → 最終URL: {final}")
+        print(f"  → HTML先頭200字: {html[:200]}")
+        cookies_now = [(c.name, c.domain) for c in jar]
+        print(f"  → Cookie 数: {len(cookies_now)}: {cookies_now}")
+        direct_login_ok = "logout" in html.lower() or "mode=entry" in html.lower()
+        print(f"  → 直接ログイン成功判定: {direct_login_ok}")
+    except Exception as e:
+        print(f"  → 直接ログイン例外: {e}")
+        direct_login_ok = False
+        html, final = "", ""
 
-def _xml_escape(text: str) -> str:
-    return (text
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;"))
+    # ── 2. 失敗なら jugem.jp の JS バンドルから認証 API を探す ──
+    if not direct_login_ok:
+        print("  → jugem.jp/login の JS を解析して認証 API を探します...")
+        try:
+            login_html, _ = do_get("https://jugem.jp/login")
+            js_srcs = re.findall(r'src=["\']([^"\']*\.js[^"\']*)["\']', login_html)
+            print(f"  → JS ファイル数: {len(js_srcs)}")
+            for s in js_srcs[:3]:
+                print(f"    {s[:100]}")
+        except Exception as e:
+            print(f"  → jugem.jp/login 取得失敗: {e}")
+            js_srcs = []
+
+        auth_api_path = None
+        for src in js_srcs[:5]:
+            url = src if src.startswith("http") else ("https://jugem.jp" + (src if src.startswith("/") else "/" + src))
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
+                with opener.open(req, timeout=30) as res:
+                    js = res.read(512 * 1024).decode("utf-8", errors="ignore")
+                hits = re.findall(r'["\'`](/(?:api|auth)[^"\'`\s<>]{2,80})["\' `]', js)
+                auth_hits = [h for h in hits if any(k in h.lower() for k in ["login", "sign", "auth", "session"])]
+                if auth_hits:
+                    unique = list(dict.fromkeys(auth_hits))
+                    print(f"  → 認証パス候補: {unique[:5]}")
+                    auth_api_path = unique[0]
+                    break
+            except Exception as e:
+                print(f"  → JS取得スキップ ({url[-60:]}): {e}")
+
+        # 既知パターンも含めて試す
+        api_candidates = ([auth_api_path] if auth_api_path else []) + [
+            "/api/login", "/api/v1/login", "/api/auth/login",
+            "/api/v1/sessions", "/api/sessions",
+        ]
+        direct_login_ok = False
+        for api_path in api_candidates:
+            api_url = f"https://jugem.jp{api_path}"
+            for mode in ["json", "form"]:
+                try:
+                    if mode == "json":
+                        resp, final = do_post_json(
+                            api_url,
+                            {"email": JUGEM_USER, "password": JUGEM_PASS},
+                            referer="https://jugem.jp/login",
+                        )
+                    else:
+                        resp, final = do_post(
+                            api_url,
+                            {"email": JUGEM_USER, "password": JUGEM_PASS},
+                            extra_headers={"Referer": "https://jugem.jp/login"},
+                        )
+                    print(f"  → {api_path} ({mode}): 成功 final={final} resp={resp[:100]}")
+                    direct_login_ok = True
+                    break
+                except urllib.error.HTTPError as e:
+                    err = e.read().decode(errors="ignore")
+                    print(f"  → {api_path} ({mode}): HTTP {e.code} {err[:80]}")
+                except Exception as e:
+                    print(f"  → {api_path} ({mode}): {e}")
+            if direct_login_ok:
+                break
+
+    if not direct_login_ok:
+        raise RuntimeError("JUGEM 認証失敗。上記ログを確認してください。")
+
+    # ── 3. 記事投稿フォームを取得 ──
+    entry_url = f"https://nadaryu.jugem.cc/manage/?mode=entry"
+    print(f"  → 記事投稿ページ取得: {entry_url}")
+    entry_html, entry_final = do_get(entry_url)
+    print(f"  → 最終URL: {entry_final}")
+    print(f"  → HTML先頭300字: {entry_html[:300]}")
+
+    # ログイン画面に戻された場合
+    if "jugem.jp/login" in entry_final or "mode=login" in entry_final:
+        raise RuntimeError(f"セッション未確立。記事投稿ページにアクセスできません。final={entry_final}")
+
+    # フォームの action / hidden fields を収集
+    form_action_m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
+    form_action = form_action_m.group(1) if form_action_m else entry_url
+    hidden = {}
+    for m in re.finditer(
+        r'<input[^>]+type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
+        entry_html, re.IGNORECASE
+    ):
+        hidden[m.group(1)] = m.group(2)
+    for m in re.finditer(
+        r'<input[^>]+name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\']',
+        entry_html, re.IGNORECASE
+    ):
+        hidden[m.group(1)] = m.group(2)
+    print(f"  → フォームaction: {form_action}")
+    print(f"  → hidden fields: {list(hidden.keys())}")
+
+    # ── 4. 記事を投稿 ──
+    post_params = {
+        **hidden,
+        "subject":  title,
+        "body":     body,
+        "mode":     "entry",
+        "action":   "confirm",
+    }
+    print(f"  → 記事投稿 POST: {form_action}")
+    conf_html, conf_final = do_post(form_action, post_params,
+                                    extra_headers={"Referer": entry_url})
+    print(f"  → 確認ページ最終URL: {conf_final}")
+    print(f"  → 確認HTML先頭300字: {conf_html[:300]}")
+
+    # 確認ページがあれば submit
+    if "confirm" in conf_final or "確認" in conf_html:
+        submit_params = {**hidden, "mode": "entry", "action": "insert"}
+        submit_params.update(dict(re.findall(
+            r'<input[^>]+name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
+            conf_html, re.IGNORECASE
+        )))
+        done_html, done_final = do_post(form_action, submit_params,
+                                        extra_headers={"Referer": conf_final})
+        print(f"  → 投稿完了URL: {done_final}")
+    else:
+        done_final = conf_final
+
+    eid_m = re.search(r'eid=(\d+)', done_final + conf_html)
+    return eid_m.group(1) if eid_m else "ok"
 
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
