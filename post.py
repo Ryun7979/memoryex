@@ -225,52 +225,41 @@ def post_to_jugem(title: str, body: str) -> str:
     # 現在のJST日時をフォームに明示的にセット
     now = datetime.now(JST)
 
-    # フォーム内の textarea 名を確認
-    textarea_names = re.findall(r'<textarea[^>]+name=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
-    print(f"  → textarea names: {textarea_names}")
-    # 全 input 要素の name/type を確認
-    all_inputs = re.findall(r'<input[^>]+>', entry_html, re.IGNORECASE)
-    input_info = [(re.search(r'name=["\']([^"\']+)["\']', i, re.IGNORECASE) or type('', (), {'group': lambda *a: '?'}))
-                  .group(1) + ':' +
-                  (re.search(r'type=["\']([^"\']+)["\']', i, re.IGNORECASE) or type('', (), {'group': lambda *a: 'text'}))
-                  .group(1) for i in all_inputs]
-    print(f"  → all inputs: {input_info}")
+    # ボタンの onclick 属性を確認（JS がどの action を渡しているか）
+    button_tags = re.findall(r'<input[^>]+type=["\']button["\'][^>]*>', entry_html, re.IGNORECASE)
+    for b in button_tags:
+        onclick = re.search(r'onclick=["\']([^"\']{0,200})["\']', b, re.IGNORECASE)
+        val     = re.search(r'value=["\']([^"\']+)["\']', b, re.IGNORECASE)
+        print(f"  → button value={val.group(1) if val else '?'} onclick={onclick.group(1) if onclick else '?'}")
+
     print(f"  → hidden fields: {list(hidden.keys())}")
 
-    # ── 4. 直接 action=insert で投稿（confirm をスキップ）──
-    # textarea 名の候補: description, body, content, text
-    body_field = textarea_names[0] if textarea_names else "description"
-    print(f"  → body field: {body_field}")
+    # ── 4. action を URL パラメータとして渡して投稿 ──
+    # JUGEM は type=button の JS onclick でフォームの action を URL に付加して送信するため
+    # POST ボディではなく URL クエリに action=insert を含める
+
+    insert_url = form_action.rstrip("&") + "&action=insert"
 
     insert_params = {
         **hidden,
-        "title":     title,
-        body_field:  body,
-        "mode":      "write",
-        "action":    "insert",
-        "state":     "1",
-        "year":      str(now.year),
-        "month":     str(now.month).zfill(2),
-        "day":       str(now.day).zfill(2),
-        "hour":      str(now.hour).zfill(2),
-        "minute":    str(now.minute).zfill(2),
-        "set_date":  "1",
+        "title":       title,
+        "description": body,
+        "state":       "1",
+        "set_date":    "0",   # 0=自動（現在時刻）
     }
-    print(f"  → 直接 insert 送信: {form_action}")
+    print(f"  → insert URL: {insert_url}")
+    print(f"  → insert params keys: {list(insert_params.keys())}")
     done_html, done_final = do_post(
-        form_action,
+        insert_url,
         insert_params,
         extra_headers={"Referer": entry_final},
     )
     print(f"  → 公開後URL: {done_final}")
-    # エラーメッセージを探す（JS error ハンドラを除く）
     for m in re.finditer(r'(?:エラー|失敗|invalid|必須|required)[^<]{0,150}', done_html, re.IGNORECASE):
         print(f"  → エラー候補: {m.group(0)[:100]}")
-    # HTML 内の全 eid を列挙
     all_eids = re.findall(r'eid=(\d+)', done_html)
     print(f"  → done_html 内の eid 一覧: {all_eids[:10]}")
-    # URL が変わった場合は成功の可能性
-    if done_final != form_action:
+    if done_final != insert_url and done_final != form_action:
         print(f"  → URL変化あり（成功の可能性）: {done_final}")
     print(f"  → 公開後レスポンス (2000字): {done_html[200:2200]}")
 
