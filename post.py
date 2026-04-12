@@ -239,13 +239,37 @@ def post_to_jugem(title: str, body: str) -> str:
     print(f"  → 確認ページ冒頭: {conf_html[:500]}")
 
     # 確認ページの hidden fields を取得して insert（公開）
-    conf_hidden = dict(re.findall(
+    # name/value どちらが先でも取得できるよう両パターン対応
+    conf_hidden = {}
+    for m in re.finditer(
+        r'<input[^>]+(?:type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']'
+        r'|name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\']'
+        r'|name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\'][^>]*type=["\']hidden["\']'
+        r'|value=["\']([^"\']*)["\'][^>]*name=["\']([^"\']+)["\'][^>]*(?:type=["\']hidden["\'])?)',
+        conf_html, re.IGNORECASE
+    ):
+        groups = m.groups()
+        # (name, value) のペアを各グループから取得
+        if groups[0]:   name, value = groups[0], groups[1]
+        elif groups[2]: name, value = groups[2], groups[3]
+        elif groups[4]: name, value = groups[4], groups[5]
+        elif groups[7]: name, value = groups[7], groups[6]
+        else: continue
+        if name:
+            conf_hidden[name] = value
+
+    # type=hidden 以外の input も含めて name/value を取得（確認ページは hidden に集約されるが念のため）
+    for m in re.finditer(
         r'<input[^>]+name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
         conf_html, re.IGNORECASE
-    ))
+    ):
+        n, v = m.group(1), m.group(2)
+        if n not in conf_hidden:
+            conf_hidden[n] = v
+
     print(f"  → confirm hidden fields: {list(conf_hidden.keys())}")
-    # state が confirm から引き継がれない場合は上書き
-    conf_hidden.setdefault("state", "1")
+    print(f"  → csrf_token in conf: {conf_hidden.get('csrf_token', 'MISSING')[:20] if conf_hidden.get('csrf_token') else 'MISSING'}")
+    conf_hidden["state"] = "1"
     print(f"  → 公開送信 (action=insert): {form_action}")
     done_html, done_final = do_post(
         form_action,
@@ -253,9 +277,16 @@ def post_to_jugem(title: str, body: str) -> str:
         extra_headers={"Referer": conf_final},
     )
     print(f"  → 公開後URL: {done_final}")
-    print(f"  → 公開後レスポンス冒頭: {done_html[:500]}")
+    print(f"  → 公開後レスポンス (1000字): {done_html[:1000]}")
 
-    eid_m = re.search(r'eid=(\d+)', done_final + done_html)
+    # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
+    eid_m = re.search(r'eid=(\d+)', done_final)
+    if not eid_m:
+        # URL になければ HTML 本文から（リスト中の最大 eid が新記事の可能性が高い）
+        eids = re.findall(r'eid=(\d+)', done_html)
+        if eids:
+            eid_m_val = max(eids, key=lambda x: int(x))
+            return eid_m_val
     return eid_m.group(1) if eid_m else "ok"
 
 def main():
