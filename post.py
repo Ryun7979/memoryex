@@ -116,56 +116,48 @@ def format_with_gemini(messages: list[str]) -> dict:
 
 
 def post_to_jugem(title: str, body: str) -> str:
-    """JUGEM ブログに XML-RPC（MetaWeblog API）で投稿する。"""
-    import http.client
-    import ssl
+    import http.client, ssl, urllib.parse
 
-    # XML-RPC リクエストを手動で組み立て
-    request_xml = xmlrpc.client.dumps(
-        (JUGEM_BLOG_ID, JUGEM_USER, JUGEM_PASS,
-         {
-             "title":            title,
-             "description":      body,
-             "mt_allow_comments": 1,
-             "mt_allow_pings":    0,
-         },
-         True),
-        "metaWeblog.newPost"
-    ).encode("utf-8")
+    def xmlrpc_call(method, params):
+        request_xml = xmlrpc.client.dumps(params, method).encode("utf-8")
+        url = "http://nadaryu.jugem.cc/admin/xmlrpc.php"
+        for _ in range(5):
+            parsed = urllib.parse.urlparse(url)
+            ctx = ssl.create_default_context()
+            conn = (http.client.HTTPSConnection(parsed.netloc, timeout=15, context=ctx)
+                    if parsed.scheme == "https"
+                    else http.client.HTTPConnection(parsed.netloc, timeout=15))
+            conn.request("POST", parsed.path or "/", body=request_xml,
+                         headers={"Content-Type": "text/xml; charset=utf-8",
+                                  "User-Agent": "Python-xmlrpc/3"})
+            res = conn.getresponse()
+            if res.status in (301, 302, 303, 307, 308):
+                url = res.getheader("Location", "")
+                continue
+            data = res.read()
+            result, _ = xmlrpc.client.loads(data)
+            return result
+        raise RuntimeError("リダイレクトが多すぎます")
 
-    url = JUGEM_XMLRPC_URL
-    for _ in range(5):  # 最大5回リダイレクト追跡
-        import urllib.parse
-        parsed = urllib.parse.urlparse(url)
-        ctx = ssl.create_default_context()
-        if parsed.scheme == "https":
-            conn = http.client.HTTPSConnection(parsed.netloc, timeout=15, context=ctx)
-        else:
-            conn = http.client.HTTPConnection(parsed.netloc, timeout=15)
+    # ブログ一覧を取得してIDを自動検出
+    print("  → ブログ一覧を取得中...")
+    blogs = xmlrpc_call("blogger.getUsersBlogs", ("", JUGEM_USER, JUGEM_PASS))
+    print(f"  → 取得したブログ: {blogs}")
 
-        path = parsed.path or "/"
-        conn.request("POST", path, body=request_xml,
-                     headers={"Content-Type": "text/xml; charset=utf-8",
-                               "User-Agent": "Python-xmlrpc/3"})
-        res = conn.getresponse()
-        print(f"  → {res.status} {res.reason}  URL: {url}")
+    blog_id = str(blogs[0]["blogid"]) if blogs else JUGEM_BLOG_ID
 
-        if res.status in (301, 302, 303, 307, 308):
-            url = res.getheader("Location", "")
-            print(f"  → リダイレクト先: {url}")
-            continue
-
-        data = res.read()
-        print(f"  → レスポンス先頭200文字: {data[:200]}")
-
-        if res.status != 200:
-            raise RuntimeError(f"JUGEM HTTP エラー {res.status}: {data[:200]}")
-
-        result, _ = xmlrpc.client.loads(data)
-        return str(result[0])
-
-    raise RuntimeError("リダイレクトが多すぎます")
-
+    # 投稿
+    content = {
+        "title":             title,
+        "description":       body,
+        "mt_allow_comments": 1,
+        "mt_allow_pings":    0,
+    }
+    result = xmlrpc_call(
+        "metaWeblog.newPost",
+        (blog_id, JUGEM_USER, JUGEM_PASS, content, True)
+    )
+    return str(result[0])
 
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
