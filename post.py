@@ -187,34 +187,35 @@ def post_to_jugem(title: str, body: str) -> str:
     print(f"  → フォーム input names: {input_names}")
 
     # ── 2. jugem.jp/login に POST してログイン ──
-    # Laravel 標準: _token + email(or login_id) + password
-    login_ok = False
-    for id_field in ["email", "login_id", "username", "user_id"]:
-        login_payload = {"password": JUGEM_PASS, id_field: JUGEM_USER}
-        if csrf_token:
-            login_payload["_token"] = csrf_token
-        print(f"  → POST jugem.jp/login [{id_field}=JUGEM_USER] ...")
-        try:
-            resp, final = do_post(
-                "https://jugem.jp/login",
-                login_payload,
-                extra_headers={"Referer": "https://jugem.jp/login"},
-            )
-            print(f"  → 最終URL: {final}")
-            print(f"  → レスポンス先頭300字: {resp[:300]}")
-            cookies_now = [(c.name, c.domain) for c in jar]
-            print(f"  → Cookie: {cookies_now}")
-            if "jugem.jp/login" not in final:
-                print(f"  → ✅ ログイン成功 ({id_field})")
-                login_ok = True
-                break
-            else:
-                print(f"  → ログインページに留まった（{id_field} は不正かも）")
-        except urllib.error.HTTPError as e:
-            err = e.read().decode(errors="ignore")
-            print(f"  → HTTP {e.code}: {err[:200]}")
-        except Exception as e:
-            print(f"  → 例外: {e}")
+    # フォームフィールド: _token, account_name, password, is_sub_user, domain, redirect_url, isSavePass
+    login_payload = {
+        "_token":       csrf_token or "",
+        "account_name": JUGEM_USER,
+        "password":     JUGEM_PASS,
+        "is_sub_user":  "0",
+        "redirect_url": "",
+        "isSavePass":   "0",
+    }
+    print(f"  → POST jugem.jp/login [account_name=JUGEM_USER] ...")
+    try:
+        resp, final = do_post(
+            "https://jugem.jp/login",
+            login_payload,
+            extra_headers={"Referer": "https://jugem.jp/login"},
+        )
+        print(f"  → 最終URL: {final}")
+        print(f"  → レスポンス先頭300字: {resp[:300]}")
+        cookies_now = [(c.name, c.domain) for c in jar]
+        print(f"  → Cookie: {cookies_now}")
+        login_ok = "jugem.jp/login" not in final
+        print(f"  → ログイン{'成功' if login_ok else '失敗（ログインページに留まった）'}")
+    except urllib.error.HTTPError as e:
+        err = e.read().decode(errors="ignore")
+        print(f"  → HTTP {e.code}: {err[:300]}")
+        login_ok = False
+    except Exception as e:
+        print(f"  → 例外: {e}")
+        login_ok = False
 
     if not login_ok:
         raise RuntimeError("JUGEM 認証失敗。上記ログを確認してください。")
