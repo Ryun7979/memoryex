@@ -198,59 +198,46 @@ def post_to_jugem(title: str, body: str) -> str:
         raise RuntimeError(f"JUGEM ログイン失敗（ログインページに留まった）: {final}")
     print(f"  → ログイン成功: {final}")
 
-    # ── 3. 記事投稿フォームを取得（シンプルビュー）──
+    # ── 3. 記事投稿フォームを取得（rich view: csrf_token が含まれる）──
     manage_base = final.split("?")[0]  # https://nadaryu.jugem.cc/manage/
-    # view=rich はリッチテキストエディタ（JS依存）のため view=simple を使用
-    entry_html, entry_final = do_get(f"{manage_base}?mode=entry&view=simple")
+    entry_html, entry_final = do_get(f"{manage_base}?mode=entry&view=rich")
     if "jugem.jp/login" in entry_final:
         raise RuntimeError(f"セッション未確立: {entry_final}")
     print(f"  → 投稿フォームURL: {entry_final}")
 
     # フォームの action を取得
     form_action_m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
-    print(f"  → form action raw: {form_action_m.group(1) if form_action_m else 'NOT FOUND'}")
     form_action = urllib.parse.urljoin(entry_final, form_action_m.group(1) if form_action_m else "")
 
-    # submit ボタンの name/value を確認
-    buttons = re.findall(
-        r'<input[^>]+type=["\']submit["\'][^>]*>|<button[^>]*>.*?</button>',
-        entry_html, re.IGNORECASE | re.DOTALL
-    )
-    print(f"  → submit buttons: {buttons[:5]}")
-
-    # hidden fields を収集
+    # hidden fields を収集（name/value 順序どちらでも対応）
     hidden = {}
     for m in re.finditer(
         r'<input[^>]+(?:type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']'
-        r'|name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\'])',
+        r'|name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\']'
+        r'|value=["\']([^"\']*)["\'][^>]*name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'])',
         entry_html, re.IGNORECASE
     ):
-        name  = m.group(1) or m.group(3)
-        value = m.group(2) if m.group(2) is not None else m.group(4)
-        if name:
-            hidden[name] = value
+        g = m.groups()
+        if g[0]:   name, value = g[0], g[1]
+        elif g[2]: name, value = g[2], g[3]
+        elif g[5]: name, value = g[5], g[4]
+        else: continue
+        hidden[name] = value
 
-    # 現在のJST日時をフォームに明示的にセット
-    now = datetime.now(JST)
-
-    # submitEntry JS 関数の定義を抽出
-    fn_m = re.search(r'function\s+submitEntry\s*\([^)]*\)\s*\{[^}]{0,500}\}', entry_html, re.DOTALL)
-    print(f"  → submitEntry: {fn_m.group(0) if fn_m else 'NOT FOUND'}")
-    # state hidden field のデフォルト値
-    state_m = re.search(r'<input[^>]+name=["\']state["\'][^>]+value=["\']([^"\']*)["\']', entry_html, re.IGNORECASE)
-    if not state_m:
-        state_m = re.search(r'<input[^>]+value=["\']([^"\']*)["\'][^>]+name=["\']state["\']', entry_html, re.IGNORECASE)
-    print(f"  → state default value: {state_m.group(1) if state_m else 'NOT FOUND'}")
     print(f"  → hidden fields: {list(hidden.keys())}")
+    if "csrf_token" not in hidden:
+        print("  ⚠ csrf_token が取得できませんでした")
 
-    # ── 4. action パラメータなしで直接 POST（JS の form.submit() 相当）──
+    # ── 4. action パラメータなしで POST（submitEntry(form,1) 相当）──
+    # JUGEM の submitEntry(obj, state) は state をセットして form.submit() するだけ
+    # action パラメータは不要
     insert_params = {
         **hidden,
         "title":       title,
         "description": body,
         "sequel":      "",
-        "state":       "1",
-        "set_date":    "0",
+        "state":       "1",   # 1=公開
+        "set_date":    "0",   # 0=現在時刻を自動使用
     }
     print(f"  → POST URL: {form_action}")
     print(f"  → params keys: {list(insert_params.keys())}")
@@ -260,12 +247,11 @@ def post_to_jugem(title: str, body: str) -> str:
         extra_headers={"Referer": entry_final},
     )
     print(f"  → 公開後URL: {done_final}")
-    # 日本語メッセージを検索（do_post が Shift-JIS を正しくデコードするようになった）
-    for m in re.finditer(r'(?:エラー|失敗|必須|入力|タイトル|本文|成功|登録)[^<]{0,100}', done_html):
+    # 日本語エラー・成功メッセージを検索
+    for m in re.finditer(r'(?:エラー|失敗|成功|登録完了|投稿完了)[^<]{0,80}', done_html):
         print(f"  → メッセージ: {m.group(0)[:80]}")
     all_eids = re.findall(r'eid=(\d+)', done_html)
-    print(f"  → eid 一覧: {all_eids[:10]}")
-    print(f"  → レスポンス先頭: {done_html[:500]}")
+    print(f"  → eid 一覧（最大10件）: {all_eids[:10]}")
 
     # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
     eid_m = re.search(r'eid=(\d+)', done_final)
