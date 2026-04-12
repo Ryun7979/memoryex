@@ -117,7 +117,56 @@ def format_with_gemini(messages: list[str]) -> dict:
 
 def post_to_jugem(title: str, body: str) -> str:
     """JUGEM ブログに XML-RPC（MetaWeblog API）で投稿する。"""
-    server = xmlrpc.client.ServerProxy(JUGEM_XMLRPC_URL, allow_none=True)
+    import http.client
+    import urllib.parse
+
+    class RedirectTransport(xmlrpc.client.SafeTransport):
+        def request(self, host, handler, request_body, verbose=False):
+            # まず http で試してリダイレクト先を取得
+            for scheme in ("https", "http"):
+                url = f"{scheme}://{host}{handler}"
+                parsed = urllib.parse.urlparse(url)
+                if parsed.scheme == "https":
+                    conn = http.client.HTTPSConnection(parsed.netloc, timeout=15)
+                else:
+                    conn = http.client.HTTPConnection(parsed.netloc, timeout=15)
+                conn.request(
+                    "POST", parsed.path,
+                    body=request_body,
+                    headers={
+                        "Content-Type": "text/xml",
+                        "User-Agent": "Python-xmlrpc/3",
+                    }
+                )
+                res = conn.getresponse()
+                if res.status in (301, 302, 303, 307, 308):
+                    location = res.getheader("Location", "")
+                    parsed2 = urllib.parse.urlparse(location)
+                    if parsed2.scheme == "https":
+                        conn2 = http.client.HTTPSConnection(parsed2.netloc, timeout=15)
+                    else:
+                        conn2 = http.client.HTTPConnection(parsed2.netloc, timeout=15)
+                    conn2.request(
+                        "POST", parsed2.path,
+                        body=request_body,
+                        headers={
+                            "Content-Type": "text/xml",
+                            "User-Agent": "Python-xmlrpc/3",
+                        }
+                    )
+                    res = conn2.getresponse()
+                data = res.read()
+                p, u = self.getparser()
+                p.feed(data)
+                p.close()
+                return u.close()
+            raise RuntimeError("JUGEM への接続に失敗しました")
+
+    server = xmlrpc.client.ServerProxy(
+        JUGEM_XMLRPC_URL,
+        transport=RedirectTransport(),
+        allow_none=True
+    )
 
     content = {
         "title":       title,
@@ -129,12 +178,11 @@ def post_to_jugem(title: str, body: str) -> str:
 
     try:
         post_id = server.metaWeblog.newPost(
-            JUGEM_BLOG_ID, JUGEM_USER, JUGEM_PASS, content, True  # True = 公開
+            JUGEM_BLOG_ID, JUGEM_USER, JUGEM_PASS, content, True
         )
         return str(post_id)
     except xmlrpc.client.Fault as e:
         raise RuntimeError(f"JUGEM 投稿エラー (faultCode={e.faultCode}): {e.faultString}")
-
 
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
