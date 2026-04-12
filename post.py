@@ -20,7 +20,7 @@ JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
 JUGEM_ATOM_URL   = "https://nadaryu.jugem.cc/atom/entry/"
-GEMINI_MODEL     = "gemini-2.0-flash"
+GEMINI_MODEL     = "gemini-1.5-flash"
 # ────────────────────────────────────────────────────────
 
 
@@ -211,24 +211,33 @@ def _xml_escape(text: str) -> str:
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
 
-    # 1. Telegram からメモ取得
-    print("📨 Telegram からメッセージを取得中...")
-    messages = get_today_messages()
-    if not messages:
-        print("⚠️  今日のメモが見つかりませんでした。投稿をスキップします。")
-        return
-    print(f"✅  {len(messages)} 件取得:")
-    for i, m in enumerate(messages, 1):
-        print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
+    test_mode = os.environ.get("TEST_MODE", "").lower() in ("1", "true", "yes")
 
-    # 2. Gemini で整形
-    print("\n🤖 Gemini で記事を生成中...")
-    article = format_with_gemini(messages)
-    print(f"✅  タイトル: {article['title']}")
+    if test_mode:
+        print("🔧 TEST_MODE: Telegram/Gemini をスキップして固定文字列で投稿します。")
+        title = "テスト投稿"
+        body  = "<p>これは接続確認用のテスト投稿です。自動投稿スクリプトから送信されました。</p>"
+    else:
+        # 1. Telegram からメモ取得
+        print("📨 Telegram からメッセージを取得中...")
+        messages = get_today_messages()
+        if not messages:
+            print("⚠️  今日のメモが見つかりませんでした。投稿をスキップします。")
+            return
+        print(f"✅  {len(messages)} 件取得:")
+        for i, m in enumerate(messages, 1):
+            print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
+
+        # 2. Gemini で整形
+        print("\n🤖 Gemini で記事を生成中...")
+        article = format_with_gemini(messages)
+        title = article["title"]
+        body  = article["body"]
+        print(f"✅  タイトル: {title}")
 
     # 3. JUGEM に投稿
     print("\n📝 JUGEM に投稿中...")
-    post_id = post_to_jugem(article["title"], article["body"])
+    post_id = post_to_jugem(title, body)
     print(f"✅  投稿完了！ post_id = {post_id}")
     print(f"   URL: https://nadaryu.jugem.cc/?eid={post_id}")
 
