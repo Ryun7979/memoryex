@@ -157,104 +157,66 @@ def post_to_jugem(title: str, body: str) -> str:
         with opener.open(req, timeout=20) as res:
             return res.read().decode("utf-8", errors="ignore"), res.geturl()
 
-    def do_post_json(url, payload, referer=None):
-        data = json.dumps(payload).encode()
-        h = {
-            "User-Agent": UA,
-            "Content-Type": "application/json",
-            "Accept": "application/json, */*",
-            "Accept-Language": "ja,en;q=0.9",
-        }
-        if referer:
-            h["Referer"] = referer
-        req = urllib.request.Request(url, data=data, headers=h, method="POST")
-        with opener.open(req, timeout=20) as res:
-            return res.read().decode("utf-8", errors="ignore"), res.geturl()
+# ── 1. jugem.jp/login を GET して CSRF トークンとフォームフィールドを取得 ──
+    print("  → jugem.jp/login を GET...")
+    login_html, _ = do_get("https://jugem.jp/login")
+    print(f"  → HTML 先頭1000字:\n{login_html[:1000]}")
 
-    # ── 1. manage 画面に直接 POST してログインを試みる（旧方式） ──
-    manage_login_url = f"https://nadaryu.jugem.cc/manage/"
-    print(f"  → 管理画面直接ログイン試行: {manage_login_url}")
-    try:
-        html, final = do_post(manage_login_url, {
-            "blog_login_id": JUGEM_USER,
-            "blog_password":  JUGEM_PASS,
-            "mode": "login",
-        }, extra_headers={"Referer": manage_login_url})
-        print(f"  → 最終URL: {final}")
-        print(f"  → HTML先頭200字: {html[:200]}")
-        cookies_now = [(c.name, c.domain) for c in jar]
-        print(f"  → Cookie 数: {len(cookies_now)}: {cookies_now}")
-        direct_login_ok = "logout" in html.lower() or "mode=entry" in html.lower()
-        print(f"  → 直接ログイン成功判定: {direct_login_ok}")
-    except Exception as e:
-        print(f"  → 直接ログイン例外: {e}")
-        direct_login_ok = False
-        html, final = "", ""
-
-    # ── 2. 失敗なら jugem.jp の JS バンドルから認証 API を探す ──
-    if not direct_login_ok:
-        print("  → jugem.jp/login の JS を解析して認証 API を探します...")
-        try:
-            login_html, _ = do_get("https://jugem.jp/login")
-            js_srcs = re.findall(r'src=["\']([^"\']*\.js[^"\']*)["\']', login_html)
-            print(f"  → JS ファイル数: {len(js_srcs)}")
-            for s in js_srcs[:3]:
-                print(f"    {s[:100]}")
-        except Exception as e:
-            print(f"  → jugem.jp/login 取得失敗: {e}")
-            js_srcs = []
-
-        auth_api_path = None
-        for src in js_srcs[:5]:
-            url = src if src.startswith("http") else ("https://jugem.jp" + (src if src.startswith("/") else "/" + src))
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
-                with opener.open(req, timeout=30) as res:
-                    js = res.read(512 * 1024).decode("utf-8", errors="ignore")
-                hits = re.findall(r'["\'`](/(?:api|auth)[^"\'`\s<>]{2,80})["\' `]', js)
-                auth_hits = [h for h in hits if any(k in h.lower() for k in ["login", "sign", "auth", "session"])]
-                if auth_hits:
-                    unique = list(dict.fromkeys(auth_hits))
-                    print(f"  → 認証パス候補: {unique[:5]}")
-                    auth_api_path = unique[0]
-                    break
-            except Exception as e:
-                print(f"  → JS取得スキップ ({url[-60:]}): {e}")
-
-        # 既知パターンも含めて試す
-        api_candidates = ([auth_api_path] if auth_api_path else []) + [
-            "/api/login", "/api/v1/login", "/api/auth/login",
-            "/api/v1/sessions", "/api/sessions",
-        ]
-        direct_login_ok = False
-        for api_path in api_candidates:
-            api_url = f"https://jugem.jp{api_path}"
-            for mode in ["json", "form"]:
-                try:
-                    if mode == "json":
-                        resp, final = do_post_json(
-                            api_url,
-                            {"email": JUGEM_USER, "password": JUGEM_PASS},
-                            referer="https://jugem.jp/login",
-                        )
-                    else:
-                        resp, final = do_post(
-                            api_url,
-                            {"email": JUGEM_USER, "password": JUGEM_PASS},
-                            extra_headers={"Referer": "https://jugem.jp/login"},
-                        )
-                    print(f"  → {api_path} ({mode}): 成功 final={final} resp={resp[:100]}")
-                    direct_login_ok = True
-                    break
-                except urllib.error.HTTPError as e:
-                    err = e.read().decode(errors="ignore")
-                    print(f"  → {api_path} ({mode}): HTTP {e.code} {err[:80]}")
-                except Exception as e:
-                    print(f"  → {api_path} ({mode}): {e}")
-            if direct_login_ok:
+    # hidden _token を HTML から取得
+    token_m = (
+        re.search(r'<input[^>]+name=["\']_token["\'][^>]+value=["\']([^"\']+)["\']', login_html)
+        or re.search(r'<input[^>]+value=["\']([^"\']+)["\'][^>]+name=["\']_token["\']', login_html)
+    )
+    if token_m:
+        csrf_token = token_m.group(1)
+        print(f"  → CSRF token (HTML): {csrf_token[:30]}...")
+    else:
+        # XSRF-TOKEN クッキーから取得（URL デコード必須）
+        csrf_token = None
+        for c in jar:
+            if c.name == "XSRF-TOKEN":
+                csrf_token = urllib.parse.unquote(c.value)
                 break
+        if csrf_token:
+            print(f"  → CSRF token (cookie): {csrf_token[:30]}...")
+        else:
+            print("  ⚠️  CSRF token が見つかりません")
 
-    if not direct_login_ok:
+    # フォームの input name 一覧を表示（デバッグ用）
+    input_names = re.findall(r'<input[^>]+name=["\']([^"\']+)["\']', login_html, re.IGNORECASE)
+    print(f"  → フォーム input names: {input_names}")
+
+    # ── 2. jugem.jp/login に POST してログイン ──
+    # Laravel 標準: _token + email(or login_id) + password
+    login_ok = False
+    for id_field in ["email", "login_id", "username", "user_id"]:
+        login_payload = {"password": JUGEM_PASS, id_field: JUGEM_USER}
+        if csrf_token:
+            login_payload["_token"] = csrf_token
+        print(f"  → POST jugem.jp/login [{id_field}=JUGEM_USER] ...")
+        try:
+            resp, final = do_post(
+                "https://jugem.jp/login",
+                login_payload,
+                extra_headers={"Referer": "https://jugem.jp/login"},
+            )
+            print(f"  → 最終URL: {final}")
+            print(f"  → レスポンス先頭300字: {resp[:300]}")
+            cookies_now = [(c.name, c.domain) for c in jar]
+            print(f"  → Cookie: {cookies_now}")
+            if "jugem.jp/login" not in final:
+                print(f"  → ✅ ログイン成功 ({id_field})")
+                login_ok = True
+                break
+            else:
+                print(f"  → ログインページに留まった（{id_field} は不正かも）")
+        except urllib.error.HTTPError as e:
+            err = e.read().decode(errors="ignore")
+            print(f"  → HTTP {e.code}: {err[:200]}")
+        except Exception as e:
+            print(f"  → 例外: {e}")
+
+    if not login_ok:
         raise RuntimeError("JUGEM 認証失敗。上記ログを確認してください。")
 
     # ── 3. 記事投稿フォームを取得 ──
