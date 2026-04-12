@@ -6,6 +6,7 @@ Telegram の今日のメモを Gemini で整形して JUGEM ブログに投稿�
 import os
 import json
 import base64
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -19,7 +20,7 @@ JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
 JUGEM_ATOM_URL   = "https://nadaryu.jugem.cc/atom/entry/"
-GEMINI_MODEL     = "gemini-2.5-flash"
+GEMINI_MODEL     = "gemini-2.0-flash"
 # ────────────────────────────────────────────────────────
 
 
@@ -93,11 +94,19 @@ def format_with_gemini(messages: list[str]) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST"
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as res:
-            data = json.loads(res.read())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Gemini API エラー {e.code}: {e.read().decode()}")
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                data = json.loads(res.read())
+            break
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode()
+            if e.code == 429 and attempt < 2:
+                wait = 30 * (attempt + 1)
+                print(f"  Gemini 429 レート制限。{wait}秒待機後リトライ ({attempt+1}/2)...")
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
 
     raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
