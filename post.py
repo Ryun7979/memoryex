@@ -7,7 +7,8 @@ import os
 import json
 import urllib.request
 import urllib.error
-import xmlrpc.client
+import urllib.parse
+import http.cookiejar
 from datetime import datetime, timezone, timedelta
 
 # ── 設定 ────────────────────────────────────────────────
@@ -17,9 +18,8 @@ GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
 JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
-JST              = timezone(timedelta(hours=9))
-JUGEM_XMLRPC_URL = "http://nadaryu.jugem.cc/manage/xmlrpc.php"
-JUGEM_BLOG_ID = "1"
+JST          = timezone(timedelta(hours=9))
+JUGEM_BASE   = "https://nadaryu.jugem.cc"
 GEMINI_MODEL = "gemini-2.5-flash"
 # ────────────────────────────────────────────────────────
 
@@ -116,74 +116,106 @@ def format_with_gemini(messages: list[str]) -> dict:
 
 
 def post_to_jugem(title: str, body: str) -> str:
-    """JUGEM管理画面にログインして記事を投稿する。"""
-    import http.client, ssl, urllib.parse
+    """JUGEM管理画面にHTTPフォーム送信でログインして記事を投稿する。"""
 
-    ctx = ssl.create_default_context()
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(jar),
+        urllib.request.HTTPRedirectHandler(),
+    )
+    # ブラウザと区別がつかないようなヘッダーを設定
+    opener.addheaders = [
+        ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36"),
+        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        ("Accept-Language", "ja,en-US;q=0.7,en;q=0.3"),
+        ("Accept-Encoding", "identity"),
+    ]
 
-    def make_conn():
-        return http.client.HTTPSConnection("nadaryu.jugem.cc", timeout=15, context=ctx)
-
-    # セッションCookieを保持
-    cookies = {}
-
-    def request(method, path, params=None, extra_headers=None):
-        conn = make_conn()
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
-        }
-        if extra_headers:
-            headers.update(extra_headers)
-        body_data = urllib.parse.urlencode(params).encode() if params else None
-        if body_data:
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
-            headers["Content-Length"] = str(len(body_data))
-        conn.request(method, path, body=body_data, headers=headers)
-        res = conn.getresponse()
-        # Cookieを更新
-        for h, v in res.getheaders():
-            if h.lower() == "set-cookie":
-                name, _, rest = v.partition("=")
-                val, _, _ = rest.partition(";")
-                cookies[name.strip()] = val.strip()
+    def get(url, referer=None):
+        req = urllib.request.Request(url)
+        if referer:
+            req.add_header("Referer", referer)
+        res = opener.open(req, timeout=20)
         return res, res.read().decode("utf-8", errors="ignore")
 
-    # ログインページ取得（トークン取得）
-    res, html = request("GET", "/manage/?mode=login")
+    def post(url, params: dict, referer=None):
+        data = urllib.parse.urlencode(params).encode()
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if referer:
+            req.add_header("Referer", referer)
+        res = opener.open(req, timeout=20)
+        return res, res.read().decode("utf-8", errors="ignore")
 
-    # ログイン実行
-    params = {
+    # ── 1. ログインページ取得（セッションCookie発行）──
+    login_url = f"{JUGEM_BASE}/manage/?mode=login"
+    get(login_url)
+
+    # ── 2. ログイン POST（Refererをログインページに設定）──
+    res, html = post(login_url, {
         "jugem_id": JUGEM_USER,
-        "password":  JUGEM_PASS,
-        "mode":      "login",
-        "action":    "login",
-    }
-    res, html = request("POST", "/manage/?mode=login", params)
-    print(f"  → ログイン: {res.status}")
+        "password": JUGEM_PASS,
+        "mode":     "login",
+        "action":   "login",
+    }, referer=login_url)
+    print(f"  → ログイン後URL: {res.url}")
 
-    if res.status in (301, 302):
-        location = dict(res.getheaders()).get("location", "")
-        res, html = request("GET", location or "/manage/?mode=top")
-
+    # ログイン成功確認（管理トップへリダイレクトされているはず）
     if "ログアウト" not in html and "logout" not in html.lower():
-        raise RuntimeError(f"ログイン失敗。ID/PASSを確認してください。")
+        # ダッシュボードを明示取得して再確認
+        _, html2 = get(f"{JUGEM_BASE}/manage/?mode=top", referer=login_url)
+        if "ログアウト" not in html2 and "logout" not in html2.lower():
+            raise RuntimeError("ログイン失敗。JUGEM_USER / JUGEM_PASS を確認してください。")
+        html = html2
     print("  → ログイン成功")
 
-    # 記事投稿
-    params = {
+    # ── 3. 記事投稿フォームページ取得（hidden フィールド収集）──
+    top_url = f"{JUGEM_BASE}/manage/?mode=top"
+    entry_top_url = f"{JUGEM_BASE}/manage/?mode=entry"
+    _, entry_html = get(entry_top_url, referer=top_url)
+
+    # hidden フィールドを抽出して hidden_params に格納
+    import re
+    hidden_params: dict[str, str] = {}
+    for m in re.finditer(
+        r'<input[^>]+type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
+        entry_html, re.IGNORECASE
+    ):
+        hidden_params[m.group(1)] = m.group(2)
+    # name/value の順が逆のパターンも拾う
+    for m in re.finditer(
+        r'<input[^>]+name=["\']([^"\']+)["\'][^>]*type=["\']hidden["\'][^>]*value=["\']([^"\']*)["\']',
+        entry_html, re.IGNORECASE
+    ):
+        hidden_params[m.group(1)] = m.group(2)
+
+    # ── 4. 記事投稿 POST ──
+    post_params = {
+        **hidden_params,
         "mode":    "entry",
         "action":  "insert",
         "subject": title,
         "body":    body,
-        "status":  "1",  # 公開
+        "extend":  "",
+        "status":  "1",   # 1=公開
+        "tag":     "",
     }
-    res, html = request("POST", "/manage/?mode=entry&action=insert", params)
-    print(f"  → 投稿: {res.status}")
+    entry_post_url = f"{JUGEM_BASE}/manage/?mode=entry&action=insert"
+    res, html = post(entry_post_url, post_params, referer=entry_top_url)
+    print(f"  → 投稿後URL: {res.url}")
+    print(f"  → レスポンス先頭200字: {html[:200]}")
 
-    if "投稿しました" in html or res.status in (200, 301, 302):
-        return "ok"
-    raise RuntimeError(f"投稿失敗: {html[:300]}")
+    # 成功判定：「投稿しました」または管理画面のentry一覧へリダイレクト
+    if "投稿しました" in html or "mode=entry" in res.url or res.status == 200:
+        # URLからeid（記事ID）を取り出せれば返す
+        eid_m = re.search(r'eid=(\d+)', res.url + html)
+        return eid_m.group(1) if eid_m else "ok"
+
+    raise RuntimeError(f"投稿失敗: ステータス={res.status}\n{html[:500]}")
 
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
