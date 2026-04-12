@@ -245,31 +245,38 @@ def post_to_jugem(title: str, body: str) -> str:
         entry_html, re.IGNORECASE
     ):
         hidden[m.group(1)] = m.group(2)
-    print(f"  → フォームaction: {form_action}")
+    # 相対URLを絶対URLに変換
+    form_action_abs = urllib.parse.urljoin(entry_final, form_action)
+    print(f"  → フォームaction (絶対): {form_action_abs}")
     print(f"  → hidden fields: {list(hidden.keys())}")
+    # HTMLの全 input name を出力（投稿フィールド名の確認用）
+    all_inputs = re.findall(r'<input[^>]+name=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
+    textarea_names = re.findall(r'<textarea[^>]+name=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
+    print(f"  → 全 input names: {all_inputs}")
+    print(f"  → textarea names: {textarea_names}")
 
     # ── 4. 記事を投稿 ──
     post_params = {
         **hidden,
         "subject":  title,
         "body":     body,
-        "mode":     "entry",
+        "mode":     "write",
         "action":   "confirm",
     }
-    print(f"  → 記事投稿 POST: {form_action}")
-    conf_html, conf_final = do_post(form_action, post_params,
-                                    extra_headers={"Referer": entry_url})
+    print(f"  → 記事投稿 POST: {form_action_abs}")
+    conf_html, conf_final = do_post(form_action_abs, post_params,
+                                    extra_headers={"Referer": entry_final})
     print(f"  → 確認ページ最終URL: {conf_final}")
     print(f"  → 確認HTML先頭300字: {conf_html[:300]}")
 
     # 確認ページがあれば submit
     if "confirm" in conf_final or "確認" in conf_html:
-        submit_params = {**hidden, "mode": "entry", "action": "insert"}
+        submit_params = {**hidden, "mode": "write", "action": "insert"}
         submit_params.update(dict(re.findall(
             r'<input[^>]+name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
             conf_html, re.IGNORECASE
         )))
-        done_html, done_final = do_post(form_action, submit_params,
+        done_html, done_final = do_post(form_action_abs, submit_params,
                                         extra_headers={"Referer": conf_final})
         print(f"  → 投稿完了URL: {done_final}")
     else:
