@@ -1,0 +1,29 @@
+name: Daily Blog Post
+
+on:
+  schedule:
+    - cron: "0 14 * * *"   # 毎日 23:00 JST（= 14:00 UTC）
+  workflow_dispatch:        # GitHub UI から手動実行も可能
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: ブログ投稿スクリプトを実行
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
+          JUGEM_USER:       ${{ secrets.JUGEM_USER }}
+          JUGEM_PASS:       ${{ secrets.JUGEM_PASS }}
+        run: python post.py
