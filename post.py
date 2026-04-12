@@ -116,48 +116,74 @@ def format_with_gemini(messages: list[str]) -> dict:
 
 
 def post_to_jugem(title: str, body: str) -> str:
+    """JUGEM管理画面にログインして記事を投稿する。"""
     import http.client, ssl, urllib.parse
 
-    def xmlrpc_call(method, params):
-        request_xml = xmlrpc.client.dumps(params, method).encode("utf-8")
-        url = "http://nadaryu.jugem.cc/admin/xmlrpc.php"
-        for _ in range(5):
-            parsed = urllib.parse.urlparse(url)
-            ctx = ssl.create_default_context()
-            conn = (http.client.HTTPSConnection(parsed.netloc, timeout=15, context=ctx)
-                    if parsed.scheme == "https"
-                    else http.client.HTTPConnection(parsed.netloc, timeout=15))
-            conn.request("POST", parsed.path or "/", body=request_xml,
-                         headers={"Content-Type": "text/xml; charset=utf-8",
-                                  "User-Agent": "Python-xmlrpc/3"})
-            res = conn.getresponse()
-            if res.status in (301, 302, 303, 307, 308):
-                url = res.getheader("Location", "")
-                continue
-            data = res.read()
-            result, _ = xmlrpc.client.loads(data)
-            return result
-        raise RuntimeError("リダイレクトが多すぎます")
+    ctx = ssl.create_default_context()
 
-    # ブログ一覧を取得してIDを自動検出
-    print("  → ブログ一覧を取得中...")
-    blogs = xmlrpc_call("blogger.getUsersBlogs", ("", JUGEM_USER, JUGEM_PASS))
-    print(f"  → 取得したブログ: {blogs}")
+    def make_conn():
+        return http.client.HTTPSConnection("nadaryu.jugem.cc", timeout=15, context=ctx)
 
-    blog_id = str(blogs[0]["blogid"]) if blogs else JUGEM_BLOG_ID
+    # セッションCookieを保持
+    cookies = {}
 
-    # 投稿
-    content = {
-        "title":             title,
-        "description":       body,
-        "mt_allow_comments": 1,
-        "mt_allow_pings":    0,
+    def request(method, path, params=None, extra_headers=None):
+        conn = make_conn()
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
+        }
+        if extra_headers:
+            headers.update(extra_headers)
+        body_data = urllib.parse.urlencode(params).encode() if params else None
+        if body_data:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            headers["Content-Length"] = str(len(body_data))
+        conn.request(method, path, body=body_data, headers=headers)
+        res = conn.getresponse()
+        # Cookieを更新
+        for h, v in res.getheaders():
+            if h.lower() == "set-cookie":
+                name, _, rest = v.partition("=")
+                val, _, _ = rest.partition(";")
+                cookies[name.strip()] = val.strip()
+        return res, res.read().decode("utf-8", errors="ignore")
+
+    # ログインページ取得（トークン取得）
+    res, html = request("GET", "/manage/?mode=login")
+
+    # ログイン実行
+    params = {
+        "jugem_id": JUGEM_USER,
+        "password":  JUGEM_PASS,
+        "mode":      "login",
+        "action":    "login",
     }
-    result = xmlrpc_call(
-        "metaWeblog.newPost",
-        (blog_id, JUGEM_USER, JUGEM_PASS, content, True)
-    )
-    return str(result[0])
+    res, html = request("POST", "/manage/?mode=login", params)
+    print(f"  → ログイン: {res.status}")
+
+    if res.status in (301, 302):
+        location = dict(res.getheaders()).get("location", "")
+        res, html = request("GET", location or "/manage/?mode=top")
+
+    if "ログアウト" not in html and "logout" not in html.lower():
+        raise RuntimeError(f"ログイン失敗。ID/PASSを確認してください。")
+    print("  → ログイン成功")
+
+    # 記事投稿
+    params = {
+        "mode":    "entry",
+        "action":  "insert",
+        "subject": title,
+        "body":    body,
+        "status":  "1",  # 公開
+    }
+    res, html = request("POST", "/manage/?mode=entry&action=insert", params)
+    print(f"  → 投稿: {res.status}")
+
+    if "投稿しました" in html or res.status in (200, 301, 302):
+        return "ok"
+    raise RuntimeError(f"投稿失敗: {html[:300]}")
 
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
