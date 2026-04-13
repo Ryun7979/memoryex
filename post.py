@@ -174,8 +174,48 @@ def get_gcal_events(client_id: str, client_secret: str, refresh_token: str) -> l
     return events
 
 
-def get_today_messages() -> list[str]:
-    """Telegram から今日（JST）送ったメッセージを取得する。"""
+def fetch_url_summary(url: str) -> dict:
+    """URL のタイトルと meta description を取得する。"""
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; memoryex/1.0)"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            content_type = res.headers.get("Content-Type", "")
+            if "text/html" not in content_type:
+                return {"url": url, "title": "", "description": ""}
+            raw = res.read(50000)  # 最大 50KB だけ読む
+        # エンコーディング判定
+        charset = "utf-8"
+        for part in content_type.split(";"):
+            if "charset=" in part:
+                charset = part.split("=")[-1].strip()
+                break
+        html = raw.decode(charset, errors="replace")
+        # title
+        m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+        # meta description
+        m = re.search(
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']',
+            html, re.IGNORECASE,
+        )
+        if not m:
+            m = re.search(
+                r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']description["\']',
+                html, re.IGNORECASE,
+            )
+        description = re.sub(r"\s+", " ", m.group(1)).strip()[:200] if m else ""
+        return {"url": url, "title": title, "description": description}
+    except Exception as e:
+        if DEBUG:
+            print(f"  [DEBUG] URL取得失敗 {url}: {e}")
+        return {"url": url, "title": "", "description": ""}
+
+
+def get_today_messages() -> tuple[list[str], list[dict]]:
+    """Telegram から今日（JST）送ったメッセージとURL情報を取得する。"""
     url = (
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
         "/getUpdates?limit=100&allowed_updates=[\"message\"]"
@@ -191,23 +231,35 @@ def get_today_messages() -> list[str]:
 
     today = datetime.now(JST).date()
     messages: list[str] = []
+    url_pattern = re.compile(r"https?://\S+")
+    found_urls: list[str] = []
 
     for update in data.get("result", []):
         msg = update.get("message") or update.get("channel_post", {})
         if not msg:
             continue
-        # chat_id が一致するメッセージのみ
         if str(msg.get("chat", {}).get("id", "")) != str(TELEGRAM_CHAT_ID):
             continue
-        # 今日のメッセージのみ
         ts = datetime.fromtimestamp(msg["date"], tz=JST)
         if ts.date() != today:
             continue
         text = msg.get("text", "").strip()
         if text:
             messages.append(text)
+            for u in url_pattern.findall(text):
+                if u not in found_urls:
+                    found_urls.append(u)
 
-    return messages
+    # URL のタイトル・概要を取得（最大5件）
+    url_summaries: list[dict] = []
+    for u in found_urls[:5]:
+        summary = fetch_url_summary(u)
+        if summary["title"] or summary["description"]:
+            url_summaries.append(summary)
+            if DEBUG:
+                print(f"  [DEBUG] URL取得: {summary['title']} - {u}")
+
+    return messages, url_summaries
 
 
 def format_with_gemini(
@@ -215,6 +267,7 @@ def format_with_gemini(
     weather: str = "",
     github_activity: list[str] = [],
     gcal_events: list[str] = [],
+    url_summaries: list[dict] = [],
 ) -> dict:
     """Gemini API でメモをブログ記事に整形する。"""
     combined = "\n".join(f"・{m}" for m in messages)
@@ -228,6 +281,15 @@ def format_with_gemini(
         extra_sections += "\n【今日の予定】\n" + "\n".join(f"・{e}" for e in gcal_events) + "\n"
     if github_activity:
         extra_sections += "\n【GitHub 活動】\n" + "\n".join(f"・{a}" for a in github_activity) + "\n"
+    if url_summaries:
+        lines = []
+        for s in url_summaries:
+            line = f"・{s['title']}"
+            if s["description"]:
+                line += f" — {s['description']}"
+            line += f"（{s['url']}）"
+            lines.append(line)
+        extra_sections += "\n【共有URL】\n" + "\n".join(lines) + "\n"
 
     prompt = f"""\
 以下は{today_str}の日常メモと補足情報です。これをブログ記事としてまとめてください。
@@ -560,13 +622,15 @@ def main():
     else:
         # 1. Telegram からメモ取得
         print("📨 Telegram からメッセージを取得中...")
-        messages = get_today_messages()
+        messages, url_summaries = get_today_messages()
         if not messages:
             print("⚠️  今日のメモが見つかりませんでした。投稿をスキップします。")
             return
         print(f"✅  {len(messages)} 件取得:")
         for i, m in enumerate(messages, 1):
             print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
+        if url_summaries:
+            print(f"   URL: {len(url_summaries)} 件取得")
 
         # 2. 補足情報を収集
         print("\n🌤️  補足情報を収集中...")
@@ -582,7 +646,7 @@ def main():
 
         # 3. Gemini で整形
         print("\n🤖 Gemini で記事を生成中...")
-        article = format_with_gemini(messages, weather, github_activity, gcal_events)
+        article = format_with_gemini(messages, weather, github_activity, gcal_events, url_summaries)
         title = article["title"]
         body  = article["body"]
         print(f"✅  タイトル: {title}")
