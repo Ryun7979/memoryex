@@ -264,16 +264,16 @@ def format_with_gemini(
         headers={"Content-Type": "application/json"},
         method="POST"
     )
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             with urllib.request.urlopen(req, timeout=30) as res:
                 data = json.loads(res.read())
             break
         except urllib.error.HTTPError as e:
             err_body = e.read().decode()
-            if e.code in (429, 503) and attempt < 2:
+            if e.code in (429, 503) and attempt < 4:
                 wait = 30 * (attempt + 1)
-                print(f"  Gemini {e.code} 一時エラー。{wait}秒待機後リトライ ({attempt+1}/2)...")
+                print(f"  Gemini {e.code} 一時エラー。{wait}秒待機後リトライ ({attempt+1}/4)...")
                 time.sleep(wait)
                 continue
             raise RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
