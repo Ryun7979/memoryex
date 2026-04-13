@@ -333,6 +333,38 @@ def post_to_jugem(title: str, body: str) -> str:
 
     raise RuntimeError(f"JUGEM 投稿失敗: 新規 eid を検出できませんでした (URL={done_final})")
 
+
+def notify_telegram(title: str, body: str, blog_url: str) -> None:
+    """ブログ記事の内容を Telegram に通知する（AI 不使用・HTML タグを平文変換）。"""
+    # <li> を箇条書き記号に、<p>/<br> を改行に変換してからタグを除去
+    text = body
+    text = re.sub(r'<li[^>]*>', '・', text, flags=re.IGNORECASE)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</p>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+
+    message = f"📝 {title}\n\n{text}\n\n🔗 {blog_url}"
+
+    payload = json.dumps({
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text":    message,
+    }).encode()
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as res:
+            result = json.loads(res.read())
+        if not result.get("ok"):
+            print(f"  [WARN] Telegram 通知失敗: {result}")
+    except urllib.error.URLError as e:
+        print(f"  [WARN] Telegram 通知エラー: {e}")
+
+
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
 
@@ -363,8 +395,14 @@ def main():
     # 3. JUGEM に投稿
     print("\n📝 JUGEM に投稿中...")
     post_id = post_to_jugem(title, body)
+    blog_url = f"https://nadaryu.jugem.cc/?eid={post_id}"
     print(f"✅  投稿完了！ post_id = {post_id}")
-    print(f"   URL: https://nadaryu.jugem.cc/?eid={post_id}")
+    print(f"   URL: {blog_url}")
+
+    # 4. Telegram に記事内容を通知
+    print("\n📨 Telegram に通知中...")
+    notify_telegram(title, body, blog_url)
+    print("✅  Telegram 通知完了")
 
 
 if __name__ == "__main__":
