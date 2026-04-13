@@ -23,7 +23,155 @@ JUGEM_PASS       = os.environ["JUGEM_PASS"]
 JST              = timezone(timedelta(hours=9))
 GEMINI_MODEL     = "gemini-2.5-flash"
 DEBUG            = os.environ.get("DEBUG_MODE", "").lower() in ("1", "true", "yes")
+
+WEATHER_LOCATION   = os.environ.get("WEATHER_LOCATION", "")
+GITHUB_USERNAME    = os.environ.get("GITHUB_USERNAME", "")
+GH_API_TOKEN       = os.environ.get("GH_API_TOKEN", "")
+GCAL_CLIENT_ID     = os.environ.get("GCAL_CLIENT_ID", "")
+GCAL_CLIENT_SECRET = os.environ.get("GCAL_CLIENT_SECRET", "")
+GCAL_REFRESH_TOKEN = os.environ.get("GCAL_REFRESH_TOKEN", "")
 # ────────────────────────────────────────────────────────
+
+
+def get_weather(location: str) -> str:
+    """wttr.in から今日の天気を取得する（APIキー不要）。"""
+    if not location:
+        return ""
+    url = f"https://wttr.in/{urllib.parse.quote(location)}?format=j1"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
+        with urllib.request.urlopen(req, timeout=10) as res:
+            data = json.loads(res.read())
+        c = data["current_condition"][0]
+        desc = c["weatherDesc"][0]["value"]
+        temp = c["temp_C"]
+        feels = c["FeelsLikeC"]
+        return f"{location}: {desc}, {temp}℃（体感 {feels}℃）"
+    except Exception as e:
+        print(f"  [WARN] 天気取得失敗: {e}")
+        return ""
+
+
+def get_github_activity(username: str, token: str = "") -> list[str]:
+    """GitHub API から今日（JST）のアクティビティを取得する。"""
+    if not username:
+        return []
+    url = f"https://api.github.com/users/{username}/events?per_page=100"
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "memoryex"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as res:
+            events = json.loads(res.read())
+    except Exception as e:
+        print(f"  [WARN] GitHub アクティビティ取得失敗: {e}")
+        return []
+
+    today = datetime.now(JST).date()
+    activities: list[str] = []
+    seen: set[str] = set()
+
+    for event in events:
+        created_at = datetime.strptime(
+            event["created_at"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc).astimezone(JST)
+        if created_at.date() != today:
+            continue
+
+        etype = event.get("type", "")
+        repo = event.get("repo", {}).get("name", "").split("/")[-1]
+        payload = event.get("payload", {})
+
+        if etype == "PushEvent":
+            for c in payload.get("commits", []):
+                msg = c.get("message", "").splitlines()[0]
+                key = f"push:{repo}:{msg}"
+                if key not in seen:
+                    activities.append(f"{repo} にコミット: {msg}")
+                    seen.add(key)
+        elif etype == "PullRequestEvent":
+            pr = payload.get("pull_request", {})
+            action = payload.get("action", "")
+            title = pr.get("title", "")
+            key = f"pr:{repo}:{title}:{action}"
+            if key not in seen:
+                activities.append(f"{repo} の PR 「{title}」を {action}")
+                seen.add(key)
+        elif etype == "IssuesEvent":
+            issue = payload.get("issue", {})
+            action = payload.get("action", "")
+            title = issue.get("title", "")
+            key = f"issue:{repo}:{title}:{action}"
+            if key not in seen:
+                activities.append(f"{repo} の Issue 「{title}」を {action}")
+                seen.add(key)
+        elif etype == "CreateEvent":
+            ref_type = payload.get("ref_type", "")
+            ref = payload.get("ref", "")
+            key = f"create:{repo}:{ref}"
+            if key not in seen:
+                activities.append(f"{repo} に {ref_type} 「{ref}」を作成")
+                seen.add(key)
+
+    return activities
+
+
+def get_gcal_events(client_id: str, client_secret: str, refresh_token: str) -> list[str]:
+    """Google Calendar API から今日（JST）の予定を取得する。"""
+    if not all([client_id, client_secret, refresh_token]):
+        return []
+
+    # アクセストークンを取得
+    token_payload = json.dumps({
+        "client_id":     client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type":    "refresh_token",
+    }).encode()
+    try:
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=token_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            access_token = json.loads(res.read())["access_token"]
+    except Exception as e:
+        print(f"  [WARN] Google Calendar トークン取得失敗: {e}")
+        return []
+
+    # 今日の開始・終了を ISO 8601 で生成
+    today_start = datetime.now(JST).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end   = today_start + timedelta(days=1)
+    params = urllib.parse.urlencode({
+        "timeMin":       today_start.isoformat(),
+        "timeMax":       today_end.isoformat(),
+        "singleEvents":  "true",
+        "orderBy":       "startTime",
+    })
+    try:
+        req = urllib.request.Request(
+            f"https://www.googleapis.com/calendar/v3/calendars/primary/events?{params}",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            items = json.loads(res.read()).get("items", [])
+    except Exception as e:
+        print(f"  [WARN] Google Calendar イベント取得失敗: {e}")
+        return []
+
+    events: list[str] = []
+    for item in items:
+        summary = item.get("summary", "(無題)")
+        start = item.get("start", {})
+        if "dateTime" in start:
+            dt = datetime.fromisoformat(start["dateTime"])
+            events.append(f"{dt.strftime('%H:%M')} {summary}")
+        else:
+            events.append(f"終日 {summary}")
+    return events
 
 
 def get_today_messages() -> list[str]:
@@ -62,29 +210,45 @@ def get_today_messages() -> list[str]:
     return messages
 
 
-def format_with_gemini(messages: list[str]) -> dict:
+def format_with_gemini(
+    messages: list[str],
+    weather: str = "",
+    github_activity: list[str] = [],
+    gcal_events: list[str] = [],
+) -> dict:
     """Gemini API でメモをブログ記事に整形する。"""
     combined = "\n".join(f"・{m}" for m in messages)
     today_str = datetime.now(JST).strftime("%Y年%-m月%-d日")
 
+    # 追加情報セクションを構築
+    extra_sections = ""
+    if weather:
+        extra_sections += f"\n【天気】\n{weather}\n"
+    if gcal_events:
+        extra_sections += "\n【今日の予定】\n" + "\n".join(f"・{e}" for e in gcal_events) + "\n"
+    if github_activity:
+        extra_sections += "\n【GitHub 活動】\n" + "\n".join(f"・{a}" for a in github_activity) + "\n"
+
     prompt = f"""\
-以下は{today_str}の日常メモです。これをブログ記事としてまとめてください。
+以下は{today_str}の日常メモと補足情報です。これをブログ記事としてまとめてください。
 
 【要件】
 - メモに書かれたことを端的にそのまま書く。説明・感想・まとめの付け足しはしない
+- 補足情報（天気・予定・GitHub）は自然に本文へ織り込む。ただし全て無理に入れなくてよい
 - ポジティブな出来事は少しだけ前向きに表現してよいが、大げさにしない
 - 一文は短く。冗長な表現・装飾・接続詞の多用は避ける
 - タイトルは 20 字以内で簡潔に
 - 本文は <p> タグで段落を区切る
 - 本文の末尾に「本日のよかったこと」セクションを必ず追加する
-  - メモの内容からポジティブな要素を 3 つ選び、なければ小さなことでも前向きに解釈して補う
+  - メモ・補足情報からポジティブな要素を 3 つ選び、なければ小さなことでも前向きに解釈して補う
   - 形式: <p><b>本日のよかったこと</b></p><ul><li>...</li><li>...</li><li>...</li></ul>
 - マークダウン不可
 - 必ず以下の JSON 形式のみで返す（コードブロック不要）:
 {{"title": "記事タイトル", "body": "<p>本文...</p><p><b>本日のよかったこと</b></p><ul><li>...</li></ul>"}}
 
 【メモ】
-{combined}"""
+{combined}
+{extra_sections}"""
 
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -389,9 +553,21 @@ def main():
         for i, m in enumerate(messages, 1):
             print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
 
-        # 2. Gemini で整形
+        # 2. 補足情報を収集
+        print("\n🌤️  補足情報を収集中...")
+        weather = get_weather(WEATHER_LOCATION)
+        if weather:
+            print(f"   天気: {weather}")
+        github_activity = get_github_activity(GITHUB_USERNAME, GH_API_TOKEN)
+        if github_activity:
+            print(f"   GitHub: {len(github_activity)} 件")
+        gcal_events = get_gcal_events(GCAL_CLIENT_ID, GCAL_CLIENT_SECRET, GCAL_REFRESH_TOKEN)
+        if gcal_events:
+            print(f"   カレンダー: {len(gcal_events)} 件")
+
+        # 3. Gemini で整形
         print("\n🤖 Gemini で記事を生成中...")
-        article = format_with_gemini(messages)
+        article = format_with_gemini(messages, weather, github_activity, gcal_events)
         title = article["title"]
         body  = article["body"]
         print(f"✅  タイトル: {title}")

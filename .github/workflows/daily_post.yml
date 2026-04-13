@@ -39,4 +39,10 @@ jobs:
           JUGEM_PASS:       ${{ secrets.JUGEM_PASS }}
           TEST_MODE:        ${{ inputs.test_mode || 'false' }}
           DEBUG_MODE:       ${{ inputs.debug_mode || 'false' }}
+          WEATHER_LOCATION: ${{ vars.WEATHER_LOCATION }}
+          GITHUB_USERNAME:  ${{ github.repository_owner }}
+          GH_API_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GCAL_CLIENT_ID:   ${{ secrets.GCAL_CLIENT_ID }}
+          GCAL_CLIENT_SECRET: ${{ secrets.GCAL_CLIENT_SECRET }}
+          GCAL_REFRESH_TOKEN: ${{ secrets.GCAL_REFRESH_TOKEN }}
         run: python post.py
