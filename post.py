@@ -21,7 +21,7 @@ JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
-GEMINI_MODEL     = "gemini-2.5-flash"
+GEMINI_MODELS    = ["gemini-2.5-flash", "gemini-2.0-flash"]
 DEBUG            = os.environ.get("DEBUG_MODE", "").lower() in ("1", "true", "yes")
 
 WEATHER_LOCATION   = os.environ.get("WEATHER_LOCATION", "")
@@ -255,28 +255,38 @@ def format_with_gemini(
         "generationConfig": {"temperature": 0.4}
     }).encode()
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    )
-    req = urllib.request.Request(
-        url, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
-    for attempt in range(5):
-        try:
-            with urllib.request.urlopen(req, timeout=30) as res:
-                data = json.loads(res.read())
+    last_error = None
+    data = None
+    for model in GEMINI_MODELS:
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={GEMINI_API_KEY}"
+        )
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        print(f"  Gemini モデル: {model}")
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as res:
+                    data = json.loads(res.read())
+                break
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode()
+                if e.code in (429, 503) and attempt < 2:
+                    wait = 30 * (attempt + 1)
+                    print(f"  Gemini {e.code} 一時エラー。{wait}秒待機後リトライ ({attempt+1}/2)...")
+                    time.sleep(wait)
+                    continue
+                last_error = RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
+                break
+        if data is not None:
             break
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode()
-            if e.code in (429, 503) and attempt < 4:
-                wait = 30 * (attempt + 1)
-                print(f"  Gemini {e.code} 一時エラー。{wait}秒待機後リトライ ({attempt+1}/4)...")
-                time.sleep(wait)
-                continue
-            raise RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
+        print(f"  {model} が利用不可。次のモデルへフォールバック...")
+    if data is None:
+        raise last_error
 
     raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
