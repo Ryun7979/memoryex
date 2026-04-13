@@ -241,6 +241,14 @@ def post_to_jugem(title: str, body: str) -> str:
             form_encoding = "shift_jis"
         elif "euc_jp" in cs or "euc-jp" in cs:
             form_encoding = "euc-jp"
+
+    # form_action の URL から view= パラメータを除去する
+    # （view=rich はエディタ表示用であり、POST 時に残っていると insert が無視される）
+    parsed = urllib.parse.urlparse(form_action)
+    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    qs.pop('view', None)
+    form_action = parsed._replace(query=urllib.parse.urlencode(qs, doseq=True)).geturl()
+
     if DEBUG:
         print(f"  [DEBUG] form_action={form_action!r}")
         print(f"  [DEBUG] form_encoding={form_encoding}")
