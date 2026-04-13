@@ -284,7 +284,7 @@ def post_to_jugem(title: str, body: str) -> str:
         selects[sel_name] = sel_m.group(1) if sel_m else ""
 
     if DEBUG:
-        print(f"  [DEBUG] hidden keys: {list(hidden.keys())}")
+        print(f"  [DEBUG] hidden: {hidden}")
         print(f"  [DEBUG] selects: {selects}")
 
     # POST 前のフォーム HTML に含まれる eid を記録（比較用）
@@ -301,7 +301,7 @@ def post_to_jugem(title: str, body: str) -> str:
         "title":       title,
         "description": body,
         "sequel":      "",
-        "state":       "0",   # 0=公開, 1=下書き
+        "state":       "1",   # 1=公開, 0=下書き（JUGEM の実際の仕様に合わせる）
         "set_date":    "0",
         "action":      "insert",
     }
