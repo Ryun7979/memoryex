@@ -287,6 +287,9 @@ def post_to_jugem(title: str, body: str) -> str:
         print(f"  [DEBUG] hidden keys: {list(hidden.keys())}")
         print(f"  [DEBUG] selects: {selects}")
 
+    # POST 前のフォーム HTML に含まれる eid を記録（比較用）
+    pre_eids = set(re.findall(r'eid=(\d+)', entry_html))
+
     # ── 4. 全フィールド + action=insert で POST ──
     insert_params = {
         **hidden,
@@ -310,18 +313,25 @@ def post_to_jugem(title: str, body: str) -> str:
     )
     print(f"  → POST 完了 URL: {done_final}")
 
-    # 成功判定: action=insert が成功した場合、JUGEM は編集画面（mode=edit&eid=XXX）へリダイレクトする
-    # done_final の URL に eid が含まれていれば新規作成成功とみなす
+    # 成功判定1: リダイレクト先 URL に eid が含まれている場合
     eid_m = re.search(r'eid=(\d+)', done_final)
     if eid_m:
         return eid_m.group(1)
 
-    # URL に eid がなければ投稿失敗（リスト画面やエラー画面に戻った可能性が高い）
-    print(f"  [WARN] POST後のURLに eid が含まれていません: {done_final}")
+    # 成功判定2: JUGEM はフォームを再表示する場合がある
+    # POST 後の HTML に現れた新規 eid（= POST 前に存在しなかった eid）を新記事とみなす
+    post_eids = set(re.findall(r'eid=(\d+)', done_html))
+    new_eids = post_eids - pre_eids
     if DEBUG:
-        eids = re.findall(r'eid=(\d+)', done_html)
-        print(f"  [DEBUG] HTML中の eid 一覧: {sorted(set(eids), key=int)}")
-    raise RuntimeError(f"JUGEM 投稿失敗: POST後URLに eid なし ({done_final})")
+        print(f"  [DEBUG] pre_eids={sorted(pre_eids, key=int)}")
+        print(f"  [DEBUG] post_eids={sorted(post_eids, key=int)}")
+        print(f"  [DEBUG] new_eids={sorted(new_eids, key=int)}")
+    if new_eids:
+        new_eid = max(new_eids, key=int)
+        print(f"  → 新規 eid 検出: {new_eid}")
+        return new_eid
+
+    raise RuntimeError(f"JUGEM 投稿失敗: 新規 eid を検出できませんでした (URL={done_final})")
 
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
