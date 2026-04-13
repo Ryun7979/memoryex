@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(gh pr create --title XMLRPC廃止・HTTPフォーム送信方式に切り替え --body ':*)",
-      "Bash(winget install:*)"
+      "Bash(winget install:*)",
+      "Bash(git push:*)",
+      "Bash(gh auth:*)",
+      "Bash(git config:*)"
     ]
   }
 }
