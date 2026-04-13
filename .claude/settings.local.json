@@ -5,7 +5,10 @@
       "Bash(winget install:*)",
       "Bash(git push:*)",
       "Bash(gh auth:*)",
-      "Bash(git config:*)"
+      "Bash(git config:*)",
+      "Bash(git credential-manager:*)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git credential-manager-core:*)"
     ]
   }
 }
