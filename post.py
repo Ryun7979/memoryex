@@ -103,9 +103,9 @@ def format_with_gemini(messages: list[str]) -> dict:
             break
         except urllib.error.HTTPError as e:
             err_body = e.read().decode()
-            if e.code == 429 and attempt < 2:
+            if e.code in (429, 503) and attempt < 2:
                 wait = 30 * (attempt + 1)
-                print(f"  Gemini 429 レート制限。{wait}秒待機後リトライ ({attempt+1}/2)...")
+                print(f"  Gemini {e.code} 一時エラー。{wait}秒待機後リトライ ({attempt+1}/2)...")
                 time.sleep(wait)
                 continue
             raise RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
