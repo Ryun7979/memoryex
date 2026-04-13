@@ -22,6 +22,7 @@ JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
 GEMINI_MODEL     = "gemini-2.5-flash"
+DEBUG            = os.environ.get("DEBUG_MODE", "").lower() in ("1", "true", "yes")
 # ────────────────────────────────────────────────────────
 
 
@@ -140,11 +141,22 @@ def post_to_jugem(title: str, body: str) -> str:
             "Accept-Language": "ja,en;q=0.9",
         })
         with opener.open(req, timeout=20) as res:
-            return res.read().decode("utf-8", errors="ignore"), res.geturl()
+            raw = res.read()
+            ct = res.headers.get("Content-Type", "")
+            if "shift_jis" in ct.lower() or "shift-jis" in ct.lower():
+                text = raw.decode("shift_jis", errors="replace")
+            elif "euc" in ct.lower():
+                text = raw.decode("euc-jp", errors="replace")
+            else:
+                text = raw.decode("utf-8", errors="ignore")
+            if DEBUG:
+                print(f"  [DEBUG] GET {url}")
+                print(f"  [DEBUG]   → final: {res.geturl()}")
+                print(f"  [DEBUG]   → Content-Type: {ct}")
+            return text, res.geturl()
 
-    def do_post(url, params, extra_headers=None):
-        # JUGEM 管理画面は Shift-JIS のフォームデータを期待している
-        data = urllib.parse.urlencode(params, encoding='shift_jis').encode('ascii')
+    def do_post(url, params, encoding="utf-8", extra_headers=None):
+        data = urllib.parse.urlencode(params, encoding=encoding).encode('ascii')
         h = {
             "User-Agent": UA,
             "Content-Type": "application/x-www-form-urlencoded",
@@ -153,6 +165,9 @@ def post_to_jugem(title: str, body: str) -> str:
         }
         if extra_headers:
             h.update(extra_headers)
+        if DEBUG:
+            print(f"  [DEBUG] POST {url}")
+            print(f"  [DEBUG]   encoding={encoding}, keys={list(params.keys())}")
         req = urllib.request.Request(url, data=data, headers=h, method="POST")
         with opener.open(req, timeout=20) as res:
             raw = res.read()
@@ -163,6 +178,10 @@ def post_to_jugem(title: str, body: str) -> str:
                 text = raw.decode("euc-jp", errors="replace")
             else:
                 text = raw.decode("utf-8", errors="ignore")
+            if DEBUG:
+                print(f"  [DEBUG]   → final: {res.geturl()}")
+                print(f"  [DEBUG]   → Content-Type: {ct}")
+                print(f"  [DEBUG]   → body[:500]: {text[:500]!r}")
             return text, res.geturl()
 
     # ── 1. jugem.jp/login を GET して CSRF トークンを取得 ──
@@ -179,8 +198,10 @@ def post_to_jugem(title: str, body: str) -> str:
             if c.name == "XSRF-TOKEN":
                 csrf_token = urllib.parse.unquote(c.value)
                 break
+    if DEBUG:
+        print(f"  [DEBUG] csrf_token={'(取得済み)' if csrf_token else '(未取得)'}")
 
-    # ── 2. jugem.jp/login に POST してログイン ──
+    # ── 2. jugem.jp/login に POST してログイン（jugem.jp は UTF-8）──
     # フォームフィールド: _token, account_name, password, is_sub_user, redirect_url, isSavePass
     print("  → JUGEM ログイン中...")
     resp, final = do_post(
@@ -193,6 +214,7 @@ def post_to_jugem(title: str, body: str) -> str:
             "redirect_url": "",
             "isSavePass":   "0",
         },
+        encoding="utf-8",
         extra_headers={"Referer": "https://jugem.jp/login"},
     )
     if "jugem.jp/login" in final:
@@ -209,6 +231,19 @@ def post_to_jugem(title: str, body: str) -> str:
     # フォームの action を取得
     form_action_m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', entry_html, re.IGNORECASE)
     form_action = urllib.parse.urljoin(entry_final, form_action_m.group(1) if form_action_m else "")
+
+    # フォームのエンコーディングを meta charset から推定
+    charset_m = re.search(r'charset=["\']?([^"\'\s;>]+)', entry_html, re.IGNORECASE)
+    form_encoding = "utf-8"
+    if charset_m:
+        cs = charset_m.group(1).lower().replace("-", "_")
+        if "shift_jis" in cs or "sjis" in cs:
+            form_encoding = "shift_jis"
+        elif "euc_jp" in cs or "euc-jp" in cs:
+            form_encoding = "euc-jp"
+    if DEBUG:
+        print(f"  [DEBUG] form_action={form_action!r}")
+        print(f"  [DEBUG] form_encoding={form_encoding}")
 
     # hidden fields を収集（name/value 順序どちらでも対応）
     hidden = {}
@@ -239,6 +274,11 @@ def post_to_jugem(title: str, body: str) -> str:
             # なければ最初のオプション
             sel_m = re.search(r'<option[^>]+value=["\']([^"\']*)["\']', sel_body, re.IGNORECASE)
         selects[sel_name] = sel_m.group(1) if sel_m else ""
+
+    if DEBUG:
+        print(f"  [DEBUG] hidden keys: {list(hidden.keys())}")
+        print(f"  [DEBUG] selects: {selects}")
+
     # ── 4. 全フィールド + action=insert で POST ──
     insert_params = {
         **hidden,
@@ -257,17 +297,23 @@ def post_to_jugem(title: str, body: str) -> str:
     done_html, done_final = do_post(
         form_action,
         insert_params,
+        encoding=form_encoding,
         extra_headers={"Referer": entry_final},
     )
-    # 成功時のリダイレクト先 URL から eid を取得（done_final 優先）
+    print(f"  → POST 完了 URL: {done_final}")
+
+    # 成功判定: action=insert が成功した場合、JUGEM は編集画面（mode=edit&eid=XXX）へリダイレクトする
+    # done_final の URL に eid が含まれていれば新規作成成功とみなす
     eid_m = re.search(r'eid=(\d+)', done_final)
-    if not eid_m:
-        # URL になければ HTML 本文から（リスト中の最大 eid が新記事の可能性が高い）
+    if eid_m:
+        return eid_m.group(1)
+
+    # URL に eid がなければ投稿失敗（リスト画面やエラー画面に戻った可能性が高い）
+    print(f"  [WARN] POST後のURLに eid が含まれていません: {done_final}")
+    if DEBUG:
         eids = re.findall(r'eid=(\d+)', done_html)
-        if eids:
-            eid_m_val = max(eids, key=lambda x: int(x))
-            return eid_m_val
-    return eid_m.group(1) if eid_m else "ok"
+        print(f"  [DEBUG] HTML中の eid 一覧: {sorted(set(eids), key=int)}")
+    raise RuntimeError(f"JUGEM 投稿失敗: POST後URLに eid なし ({done_final})")
 
 def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")

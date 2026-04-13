@@ -10,6 +10,11 @@ on:
         required: false
         default: "false"
         type: boolean
+      debug_mode:
+        description: "DEBUG_MODE: HTTP リクエスト/レスポンスの詳細を出力"
+        required: false
+        default: "false"
+        type: boolean
 
 jobs:
   post:
@@ -33,4 +38,5 @@ jobs:
           JUGEM_USER:       ${{ secrets.JUGEM_USER }}
           JUGEM_PASS:       ${{ secrets.JUGEM_PASS }}
           TEST_MODE:        ${{ inputs.test_mode || 'false' }}
+          DEBUG_MODE:       ${{ inputs.debug_mode || 'false' }}
         run: python post.py
