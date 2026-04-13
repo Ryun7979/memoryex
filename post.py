@@ -21,7 +21,7 @@ JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
-GEMINI_MODELS    = ["gemini-2.5-flash", "gemini-2.0-flash"]
+GEMINI_MODELS    = ["gemini-2.5-flash"]
 DEBUG            = os.environ.get("DEBUG_MODE", "").lower() in ("1", "true", "yes")
 
 WEATHER_LOCATION   = os.environ.get("WEATHER_LOCATION", "")
