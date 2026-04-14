@@ -30,6 +30,7 @@ GH_API_TOKEN       = os.environ.get("GH_API_TOKEN", "")
 GCAL_CLIENT_ID     = os.environ.get("GCAL_CLIENT_ID", "")
 GCAL_CLIENT_SECRET = os.environ.get("GCAL_CLIENT_SECRET", "")
 GCAL_REFRESH_TOKEN = os.environ.get("GCAL_REFRESH_TOKEN", "")
+TMDB_API_KEY       = os.environ.get("TMDB_API_KEY", "")
 # ────────────────────────────────────────────────────────
 
 
@@ -214,6 +215,46 @@ def fetch_url_summary(url: str) -> dict:
         return {"url": url, "title": "", "description": ""}
 
 
+def fetch_movie_info(title: str) -> dict:
+    """TMDB API で映画情報を取得する。"""
+    if not TMDB_API_KEY:
+        return {"title": title}
+    # 映画検索
+    search_url = (
+        f"https://api.themoviedb.org/3/search/movie"
+        f"?api_key={TMDB_API_KEY}&query={urllib.parse.quote(title)}&language=ja&page=1"
+    )
+    try:
+        req = urllib.request.Request(search_url, headers={"User-Agent": "memoryex/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as res:
+            results = json.loads(res.read()).get("results", [])
+        if not results:
+            return {"title": title}
+        movie_id = results[0]["id"]
+        ja_title = results[0].get("title", title)
+        # 映画詳細（上映時間・ジャンル）を取得
+        detail_url = (
+            f"https://api.themoviedb.org/3/movie/{movie_id}"
+            f"?api_key={TMDB_API_KEY}&language=ja"
+        )
+        req2 = urllib.request.Request(detail_url, headers={"User-Agent": "memoryex/1.0"})
+        with urllib.request.urlopen(req2, timeout=10) as res2:
+            detail = json.loads(res2.read())
+        runtime = detail.get("runtime")  # 分
+        genres = [g["name"] for g in detail.get("genres", [])]
+        overview = detail.get("overview", "")[:150]
+        return {
+            "title":    ja_title,
+            "runtime":  f"{runtime}分" if runtime else "",
+            "genres":   "・".join(genres) if genres else "",
+            "overview": overview,
+        }
+    except Exception as e:
+        if DEBUG:
+            print(f"  [DEBUG] TMDB取得失敗 '{title}': {e}")
+        return {"title": title}
+
+
 def reverse_geocode(lat: float, lon: float) -> str:
     """緯度・経度から場所名を取得する（OpenStreetMap Nominatim）。"""
     url = (
@@ -270,8 +311,10 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
         target_date = now_jst.date()
     messages: list[str] = []
     url_pattern = re.compile(r"https?://\S+")
+    movie_pattern = re.compile(r"^映画[　 :：、,]?\s*(.+)", re.MULTILINE)
     found_urls: list[str] = []
     found_locations: list[dict] = []
+    found_movies: list[str] = []
 
     for update in data.get("result", []):
         msg = update.get("message") or update.get("channel_post", {})
@@ -288,6 +331,10 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
             for u in url_pattern.findall(text):
                 if u not in found_urls:
                     found_urls.append(u)
+            for m in movie_pattern.findall(text):
+                t = m.strip()
+                if t and t not in found_movies:
+                    found_movies.append(t)
         # 位置情報メッセージを収集
         loc = msg.get("location")
         if loc:
@@ -314,7 +361,15 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
             if DEBUG:
                 print(f"  [DEBUG] 位置情報: {name} ({loc['lat']}, {loc['lon']})")
 
-    return messages, url_summaries, location_names
+    # 映画情報を TMDB から取得（最大3件）
+    movie_infos: list[dict] = []
+    for t in found_movies[:3]:
+        info = fetch_movie_info(t)
+        movie_infos.append(info)
+        if DEBUG:
+            print(f"  [DEBUG] 映画: {info}")
+
+    return messages, url_summaries, location_names, movie_infos
 
 
 def format_with_gemini(
@@ -324,6 +379,7 @@ def format_with_gemini(
     gcal_events: list[str] = [],
     url_summaries: list[dict] = [],
     location_names: list[str] = [],
+    movie_infos: list[dict] = [],
 ) -> dict:
     """Gemini API でメモをブログ記事に整形する。"""
     combined = "\n".join(f"・{m}" for m in messages)
@@ -348,6 +404,18 @@ def format_with_gemini(
         extra_sections += "\n【共有URL】\n" + "\n".join(lines) + "\n"
     if location_names:
         extra_sections += "\n【訪問場所】\n" + "\n".join(f"・{n}" for n in location_names) + "\n"
+    if movie_infos:
+        lines = []
+        for m in movie_infos:
+            line = f"・{m['title']}"
+            if m.get("runtime"):
+                line += f"（{m['runtime']}）"
+            if m.get("genres"):
+                line += f" [{m['genres']}]"
+            if m.get("overview"):
+                line += f" — {m['overview']}"
+            lines.append(line)
+        extra_sections += "\n【鑑賞した映画】\n" + "\n".join(lines) + "\n"
 
     prompt = f"""\
 以下は{today_str}の日常メモと補足情報です。これをブログ記事としてまとめてください。
@@ -687,7 +755,7 @@ def main():
     else:
         # 1. Telegram からメモ取得
         print("📨 Telegram からメッセージを取得中...")
-        messages, url_summaries, location_names = get_today_messages()
+        messages, url_summaries, location_names, movie_infos = get_today_messages()
         if not messages:
             print("⚠️  今日のメモが見つかりませんでした。投稿をスキップします。")
             return
@@ -698,6 +766,8 @@ def main():
             print(f"   URL: {len(url_summaries)} 件取得")
         if location_names:
             print(f"   位置情報: {len(location_names)} 件取得")
+        if movie_infos:
+            print(f"   映画: {len(movie_infos)} 件取得")
 
         # 2. 補足情報を収集
         print("\n🌤️  補足情報を収集中...")
@@ -713,7 +783,7 @@ def main():
 
         # 3. Gemini で整形
         print("\n🤖 Gemini で記事を生成中...")
-        article = format_with_gemini(messages, weather, github_activity, gcal_events, url_summaries, location_names)
+        article = format_with_gemini(messages, weather, github_activity, gcal_events, url_summaries, location_names, movie_infos)
         title = article["title"]
         body  = article["body"]
         print(f"✅  タイトル: {title}")
