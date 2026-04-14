@@ -214,7 +214,39 @@ def fetch_url_summary(url: str) -> dict:
         return {"url": url, "title": "", "description": ""}
 
 
-def get_today_messages() -> tuple[list[str], list[dict]]:
+def reverse_geocode(lat: float, lon: float) -> str:
+    """緯度・経度から場所名を取得する（OpenStreetMap Nominatim）。"""
+    url = (
+        f"https://nominatim.openstreetmap.org/reverse"
+        f"?lat={lat}&lon={lon}&format=json&accept-language=ja"
+    )
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "memoryex/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            data = json.loads(res.read())
+        addr = data.get("address", {})
+        # 施設名 > 観光地 > 町名 > 区 の優先順で場所名を組み立てる
+        name = (
+            data.get("name")
+            or addr.get("tourism")
+            or addr.get("amenity")
+            or addr.get("shop")
+            or addr.get("leisure")
+        )
+        city = addr.get("city") or addr.get("town") or addr.get("village") or ""
+        suburb = addr.get("suburb") or addr.get("quarter") or ""
+        parts = [p for p in [name, suburb, city] if p]
+        return "、".join(parts) if parts else data.get("display_name", "")[:50]
+    except Exception as e:
+        if DEBUG:
+            print(f"  [DEBUG] 逆ジオコーディング失敗: {e}")
+        return ""
+
+
+def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
     """Telegram から今日（JST）送ったメッセージとURL情報を取得する。"""
     url = (
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -239,6 +271,7 @@ def get_today_messages() -> tuple[list[str], list[dict]]:
     messages: list[str] = []
     url_pattern = re.compile(r"https?://\S+")
     found_urls: list[str] = []
+    found_locations: list[dict] = []
 
     for update in data.get("result", []):
         msg = update.get("message") or update.get("channel_post", {})
@@ -255,6 +288,13 @@ def get_today_messages() -> tuple[list[str], list[dict]]:
             for u in url_pattern.findall(text):
                 if u not in found_urls:
                     found_urls.append(u)
+        # 位置情報メッセージを収集
+        loc = msg.get("location")
+        if loc:
+            found_locations.append({
+                "lat": loc["latitude"],
+                "lon": loc["longitude"],
+            })
 
     # URL のタイトル・概要を取得（最大5件）
     url_summaries: list[dict] = []
@@ -265,7 +305,16 @@ def get_today_messages() -> tuple[list[str], list[dict]]:
             if DEBUG:
                 print(f"  [DEBUG] URL取得: {summary['title']} - {u}")
 
-    return messages, url_summaries
+    # 位置情報を逆ジオコーディング
+    location_names: list[str] = []
+    for loc in found_locations[:5]:
+        name = reverse_geocode(loc["lat"], loc["lon"])
+        if name:
+            location_names.append(name)
+            if DEBUG:
+                print(f"  [DEBUG] 位置情報: {name} ({loc['lat']}, {loc['lon']})")
+
+    return messages, url_summaries, location_names
 
 
 def format_with_gemini(
@@ -274,6 +323,7 @@ def format_with_gemini(
     github_activity: list[str] = [],
     gcal_events: list[str] = [],
     url_summaries: list[dict] = [],
+    location_names: list[str] = [],
 ) -> dict:
     """Gemini API でメモをブログ記事に整形する。"""
     combined = "\n".join(f"・{m}" for m in messages)
@@ -296,6 +346,8 @@ def format_with_gemini(
             line += f"（{s['url']}）"
             lines.append(line)
         extra_sections += "\n【共有URL】\n" + "\n".join(lines) + "\n"
+    if location_names:
+        extra_sections += "\n【訪問場所】\n" + "\n".join(f"・{n}" for n in location_names) + "\n"
 
     prompt = f"""\
 以下は{today_str}の日常メモと補足情報です。これをブログ記事としてまとめてください。
@@ -628,7 +680,7 @@ def main():
     else:
         # 1. Telegram からメモ取得
         print("📨 Telegram からメッセージを取得中...")
-        messages, url_summaries = get_today_messages()
+        messages, url_summaries, location_names = get_today_messages()
         if not messages:
             print("⚠️  今日のメモが見つかりませんでした。投稿をスキップします。")
             return
@@ -637,6 +689,8 @@ def main():
             print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
         if url_summaries:
             print(f"   URL: {len(url_summaries)} 件取得")
+        if location_names:
+            print(f"   位置情報: {len(location_names)} 件取得")
 
         # 2. 補足情報を収集
         print("\n🌤️  補足情報を収集中...")
@@ -652,7 +706,7 @@ def main():
 
         # 3. Gemini で整形
         print("\n🤖 Gemini で記事を生成中...")
-        article = format_with_gemini(messages, weather, github_activity, gcal_events, url_summaries)
+        article = format_with_gemini(messages, weather, github_activity, gcal_events, url_summaries, location_names)
         title = article["title"]
         body  = article["body"]
         print(f"✅  タイトル: {title}")
