@@ -229,7 +229,13 @@ def get_today_messages() -> tuple[list[str], list[dict]]:
     if not data.get("ok"):
         raise RuntimeError(f"Telegram API エラー: {data}")
 
-    today = datetime.now(JST).date()
+    now_jst = datetime.now(JST)
+    # 深夜0〜6時に実行された場合は前日のメッセージを対象にする
+    if now_jst.hour < 6:
+        target_date = (now_jst - timedelta(days=1)).date()
+        print(f"  （深夜実行のため前日 {target_date} のメッセージを取得）")
+    else:
+        target_date = now_jst.date()
     messages: list[str] = []
     url_pattern = re.compile(r"https?://\S+")
     found_urls: list[str] = []
@@ -241,7 +247,7 @@ def get_today_messages() -> tuple[list[str], list[dict]]:
         if str(msg.get("chat", {}).get("id", "")) != str(TELEGRAM_CHAT_ID):
             continue
         ts = datetime.fromtimestamp(msg["date"], tz=JST)
-        if ts.date() != today:
+        if ts.date() != target_date:
             continue
         text = msg.get("text", "").strip()
         if text:
