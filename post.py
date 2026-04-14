@@ -360,6 +360,7 @@ def format_with_gemini(
 【要件】
 - メモに書かれたことを端的にそのまま書く。説明・感想・まとめの付け足しはしない
 - 補足情報（天気・予定・GitHub）は自然に本文へ織り込む。ただし全て無理に入れなくてよい
+- カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える
 - ポジティブな出来事は少しだけ前向きに表現してよいが、大げさにしない
 - 一文は短く。冗長な表現・装飾・接続詞の多用は避ける
 - タイトルは 20 字以内で簡潔に
@@ -637,7 +638,7 @@ def post_to_jugem(title: str, body: str) -> str:
     raise RuntimeError(f"JUGEM 投稿失敗: 新規 eid を検出できませんでした (URL={done_final})")
 
 
-def notify_telegram(title: str, body: str, blog_url: str) -> None:
+def notify_telegram(title: str, body: str, blog_url: str, gcal_events: list[str] = []) -> None:
     """ブログ記事の内容を Telegram に通知する（AI 不使用・HTML タグを平文変換）。"""
     # <li> を箇条書き記号に、<p>/<br> を改行に変換してからタグを除去
     text = body
@@ -647,7 +648,12 @@ def notify_telegram(title: str, body: str, blog_url: str) -> None:
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
 
-    message = f"📝 {title}\n\n{text}\n\n🔗 {blog_url}"
+    # カレンダー情報を元の表現のまま末尾に付加
+    cal_section = ""
+    if gcal_events:
+        cal_section = "\n\n📅 今日の予定（原文）\n" + "\n".join(f"・{e}" for e in gcal_events)
+
+    message = f"📝 {title}\n\n{text}\n\n🔗 {blog_url}{cal_section}"
 
     payload = json.dumps({
         "chat_id": TELEGRAM_CHAT_ID,
@@ -672,6 +678,7 @@ def main():
     print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
 
     test_mode = os.environ.get("TEST_MODE", "").lower() in ("1", "true", "yes")
+    gcal_events: list[str] = []
 
     if test_mode:
         print("🔧 TEST_MODE: Telegram/Gemini をスキップして固定文字列で投稿します。")
@@ -720,7 +727,7 @@ def main():
 
     # 4. Telegram に記事内容を通知
     print("\n📨 Telegram に通知中...")
-    notify_telegram(title, body, blog_url)
+    notify_telegram(title, body, blog_url, gcal_events if not test_mode else [])
     print("✅  Telegram 通知完了")
 
 
