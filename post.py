@@ -118,8 +118,8 @@ def get_github_activity(username: str, token: str = "") -> list[str]:
     return activities
 
 
-def get_gcal_events(client_id: str, client_secret: str, refresh_token: str) -> list[str]:
-    """Google Calendar API から今日（JST）の予定を取得する。"""
+def get_gcal_events(client_id: str, client_secret: str, refresh_token: str, target_date=None) -> list[str]:
+    """Google Calendar API から指定日（JST）の予定を取得する。"""
     if not all([client_id, client_secret, refresh_token]):
         return []
 
@@ -143,8 +143,10 @@ def get_gcal_events(client_id: str, client_secret: str, refresh_token: str) -> l
         print(f"  [WARN] Google Calendar トークン取得失敗: {e}")
         return []
 
-    # 今日の開始・終了を ISO 8601 で生成
-    today_start = datetime.now(JST).replace(hour=0, minute=0, second=0, microsecond=0)
+    # 対象日の開始・終了を ISO 8601 で生成
+    if target_date is None:
+        target_date = datetime.now(JST).date()
+    today_start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=JST)
     today_end   = today_start + timedelta(days=1)
     params = urllib.parse.urlencode({
         "timeMin":       today_start.isoformat(),
@@ -369,7 +371,7 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
         if DEBUG:
             print(f"  [DEBUG] 映画: {info}")
 
-    return messages, url_summaries, location_names, movie_infos
+    return messages, url_summaries, location_names, movie_infos, target_date
 
 
 def format_with_gemini(
@@ -427,11 +429,12 @@ def format_with_gemini(
 - まーちゃん → 妻
 
 【要件】
-- メモに書かれたことを端的にそのまま書く。説明・感想・まとめの付け足しはしない
-- 補足情報（天気・予定・GitHub）は自然に本文へ織り込む。ただし全て無理に入れなくてよい
+- 【メモ】に含まれる内容は全て記事に反映する。一部だけを取り上げて他を省略しない
+- メモの内容を自然な日記文に仕上げる。過度な装飾・大げさな表現・接続詞の多用は避ける
+- 補足情報（天気・予定・GitHub・訪問場所・映画・URL）は自然に本文へ織り込む。ただし全て無理に入れなくてよい
+- カレンダーの予定はあくまで補足。メモが主役
 - カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える
 - ポジティブな出来事は少しだけ前向きに表現してよいが、大げさにしない
-- 一文は短く。冗長な表現・装飾・接続詞の多用は避ける
 - タイトルは 20 字以内で簡潔に
 - 本文は <p> タグで段落を区切る
 - 本文の末尾に「本日のよかったこと」セクションを必ず追加する
@@ -756,7 +759,7 @@ def main():
     else:
         # 1. Telegram からメモ取得
         print("📨 Telegram からメッセージを取得中...")
-        messages, url_summaries, location_names, movie_infos = get_today_messages()
+        messages, url_summaries, location_names, movie_infos, target_date = get_today_messages()
         if not messages:
             print("⚠️  今日のメモが見つかりませんでした。投稿をスキップします。")
             return
@@ -778,7 +781,7 @@ def main():
         github_activity = get_github_activity(GITHUB_USERNAME, GH_API_TOKEN)
         if github_activity:
             print(f"   GitHub: {len(github_activity)} 件")
-        gcal_events = get_gcal_events(GCAL_CLIENT_ID, GCAL_CLIENT_SECRET, GCAL_REFRESH_TOKEN)
+        gcal_events = get_gcal_events(GCAL_CLIENT_ID, GCAL_CLIENT_SECRET, GCAL_REFRESH_TOKEN, target_date)
         if gcal_events:
             print(f"   カレンダー: {len(gcal_events)} 件")
 
