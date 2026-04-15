@@ -710,22 +710,25 @@ def post_to_jugem(title: str, body: str) -> str:
     raise RuntimeError(f"JUGEM 投稿失敗: 新規 eid を検出できませんでした (URL={done_final})")
 
 
-def notify_telegram(title: str, body: str, blog_url: str, gcal_events: list[str] = []) -> None:
-    """ブログ記事の内容を Telegram に通知する（AI 不使用・HTML タグを平文変換）。"""
-    # <li> を箇条書き記号に、<p>/<br> を改行に変換してからタグを除去
-    text = body
-    text = re.sub(r'<li[^>]*>', '・', text, flags=re.IGNORECASE)
-    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
-    text = re.sub(r'</p>', '\n', text, flags=re.IGNORECASE)
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+def notify_telegram(
+    title: str,
+    blog_url: str,
+    messages: list[str] = [],
+    gcal_events: list[str] = [],
+) -> None:
+    """Telegram に元のメモ＋カレンダー原文を通知する（AIなし・固有名詞そのまま）。"""
+    sections = [f"📝 {title}（ブログ投稿完了）"]
 
-    # カレンダー情報を元の表現のまま末尾に付加
-    cal_section = ""
+    if messages:
+        memo = "\n".join(f"・{m}" for m in messages)
+        sections.append(f"【メモ】\n{memo}")
+
     if gcal_events:
-        cal_section = "\n\n📅 今日の予定（原文）\n" + "\n".join(f"・{e}" for e in gcal_events)
+        cal = "\n".join(f"・{e}" for e in gcal_events)
+        sections.append(f"【今日の予定】\n{cal}")
 
-    message = f"📝 {title}\n\n{text}\n\n🔗 {blog_url}{cal_section}"
+    sections.append(f"🔗 {blog_url}")
+    message = "\n\n".join(sections)
 
     payload = json.dumps({
         "chat_id": TELEGRAM_CHAT_ID,
@@ -751,6 +754,7 @@ def main():
 
     test_mode = os.environ.get("TEST_MODE", "").lower() in ("1", "true", "yes")
     gcal_events: list[str] = []
+    messages:    list[str] = []
 
     if test_mode:
         print("🔧 TEST_MODE: Telegram/Gemini をスキップして固定文字列で投稿します。")
@@ -801,7 +805,12 @@ def main():
 
     # 4. Telegram に記事内容を通知
     print("\n📨 Telegram に通知中...")
-    notify_telegram(title, body, blog_url, gcal_events if not test_mode else [])
+    notify_telegram(
+        title    = title,
+        blog_url = blog_url,
+        messages = messages if not test_mode else [],
+        gcal_events = gcal_events if not test_mode else [],
+    )
     print("✅  Telegram 通知完了")
 
 
