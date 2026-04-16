@@ -398,10 +398,10 @@ def format_with_gemini(
     if url_summaries:
         lines = []
         for s in url_summaries:
-            line = f"・{s['title']}"
+            line = f"・タイトル: {s['title']}"
             if s["description"]:
-                line += f" — {s['description']}"
-            line += f"（{s['url']}）"
+                line += f"\n  紹介: {s['description']}"
+            line += f"\n  URL: {s['url']}"
             lines.append(line)
         extra_sections += "\n【共有URL】\n" + "\n".join(lines) + "\n"
     if location_names:
@@ -431,18 +431,21 @@ def format_with_gemini(
 【要件】
 - 【メモ】に含まれる内容は全て記事に反映する。一部だけを取り上げて他を省略しない
 - メモの内容を自然な日記文に仕上げる。過度な装飾・大げさな表現・接続詞の多用は避ける
-- 補足情報（天気・予定・GitHub・訪問場所・映画・URL）は自然に本文へ織り込む。ただし全て無理に入れなくてよい
+- 話題が変わるごとに <p> タグで段落を分け、読みやすくする
+- 大きく話題が変わる箇所のみ <h3> タグでサブタイトルをつける。細かい話題ごとにはつけない
+- 補足情報（天気・予定・GitHub・訪問場所・映画）は自然に本文へ織り込む。ただし全て無理に入れなくてよい
+- 【共有URL】がある場合は、本文とは別に「本日の気になったインターネット」セクションを設ける
+  - 形式: <p><b>本日の気になったインターネット</b></p><ul><li><a href="URL">タイトル</a> — 紹介文</li>...</ul>
 - カレンダーの予定はあくまで補足。メモが主役
 - カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える
 - ポジティブな出来事は少しだけ前向きに表現してよいが、大げさにしない
 - タイトルは 20 字以内で簡潔に
-- 本文は <p> タグで段落を区切る
 - 本文の末尾に「本日のよかったこと」セクションを必ず追加する
   - メモ・補足情報からポジティブな要素を 3 つ選び、なければ小さなことでも前向きに解釈して補う
   - 形式: <p><b>本日のよかったこと</b></p><ul><li>...</li><li>...</li><li>...</li></ul>
 - マークダウン不可
 - 必ず以下の JSON 形式のみで返す（コードブロック不要）:
-{{"title": "記事タイトル", "body": "<p>本文...</p><p><b>本日のよかったこと</b></p><ul><li>...</li></ul>"}}
+{{"title": "記事タイトル", "body": "<h3>...</h3><p>...</p>...<p><b>本日のよかったこと</b></p><ul><li>...</li></ul>"}}
 
 【メモ】
 {combined}
@@ -710,25 +713,18 @@ def post_to_jugem(title: str, body: str) -> str:
     raise RuntimeError(f"JUGEM 投稿失敗: 新規 eid を検出できませんでした (URL={done_final})")
 
 
-def notify_telegram(
-    title: str,
-    blog_url: str,
-    messages: list[str] = [],
-    gcal_events: list[str] = [],
-) -> None:
-    """Telegram に元のメモ＋カレンダー原文を通知する（AIなし・固有名詞そのまま）。"""
-    sections = [f"📝 {title}（ブログ投稿完了）"]
+def notify_telegram(title: str, body: str, blog_url: str) -> None:
+    """ブログ記事の内容を Telegram に通知する（HTML タグを平文変換）。"""
+    text = body
+    text = re.sub(r'<li[^>]*>', '・', text, flags=re.IGNORECASE)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</p>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<h\d[^>]*>', '\n【', text, flags=re.IGNORECASE)
+    text = re.sub(r'</h\d>', '】\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
 
-    if messages:
-        memo = "\n".join(f"・{m}" for m in messages)
-        sections.append(f"【メモ】\n{memo}")
-
-    if gcal_events:
-        cal = "\n".join(f"・{e}" for e in gcal_events)
-        sections.append(f"【今日の予定】\n{cal}")
-
-    sections.append(f"🔗 {blog_url}")
-    message = "\n\n".join(sections)
+    message = f"📝 {title}\n\n{text}\n\n🔗 {blog_url}"
 
     payload = json.dumps({
         "chat_id": TELEGRAM_CHAT_ID,
@@ -805,12 +801,7 @@ def main():
 
     # 4. Telegram に記事内容を通知
     print("\n📨 Telegram に通知中...")
-    notify_telegram(
-        title    = title,
-        blog_url = blog_url,
-        messages = messages if not test_mode else [],
-        gcal_events = gcal_events if not test_mode else [],
-    )
+    notify_telegram(title, body, blog_url)
     print("✅  Telegram 通知完了")
 
 
