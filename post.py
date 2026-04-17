@@ -416,9 +416,12 @@ def format_with_gemini(
     location_names: list[str] = [],
     movie_infos: list[dict] = [],
     news_headlines: list[dict] = [],
+    target_date=None,
 ) -> dict:
     """Gemini API でメモをブログ記事に整形する。"""
-    today_str = datetime.now(JST).strftime("%Y年%-m月%-d日")
+    if target_date is None:
+        target_date = datetime.now(JST).date()
+    today_str = target_date.strftime("%Y年%-m月%-d日")
     has_memo = bool(messages)
 
     # 追加情報セクションを構築
@@ -909,6 +912,7 @@ def main():
         article = format_with_gemini(
             messages, weather, github_activity, gcal_events,
             url_summaries, location_names, movie_infos, news_headlines,
+            target_date=target_date,
         )
         title = article["title"]
         body  = article["body"]
