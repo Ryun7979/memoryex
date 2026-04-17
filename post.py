@@ -22,7 +22,7 @@ JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
-GEMINI_MODELS    = ["gemini-2.5-flash"]
+GEMINI_MODELS    = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 DEBUG            = os.environ.get("DEBUG_MODE", "").lower() in ("1", "true", "yes")
 
 WEATHER_LOCATION   = os.environ.get("WEATHER_LOCATION", "")
@@ -539,9 +539,14 @@ def format_with_gemini(
                 break
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode()
-                if e.code in (429, 503) and attempt < 4:
+                if e.code == 429:
+                    # 日次クォータ超過: リトライしても解決しないので即フォールバック
+                    print(f"  Gemini 429 クォータ超過。次のモデルへフォールバック...")
+                    last_error = RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
+                    break
+                if e.code == 503 and attempt < 4:
                     wait = 30 * (attempt + 1)  # 30, 60, 90, 120 秒
-                    print(f"  Gemini {e.code} 一時エラー。{wait}秒待機後リトライ ({attempt+1}/4)...")
+                    print(f"  Gemini 503 一時エラー。{wait}秒待機後リトライ ({attempt+1}/4)...")
                     time.sleep(wait)
                     continue
                 last_error = RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
