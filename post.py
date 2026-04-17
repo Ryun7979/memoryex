@@ -505,6 +505,7 @@ def format_with_gemini(
   - ポジティブな要素を 3 つ選び、なければ小さなことでも前向きに解釈して補う
   - 形式: <p><b>本日のよかったこと</b></p><ul><li>...</li><li>...</li><li>...</li></ul>
 - マークダウン不可
+- 使用する文字は JIS X 0208 の範囲に限る。en ダッシュ（–）・em ダッシュ（—）・カーリークォート（' ' " "）・黒丸（•）などの欧文特殊記号は使用しない
 - 必ず以下の JSON 形式のみで返す（コードブロック不要）:
 {{"title": "記事タイトル", "body": "<h3>...</h3><p>...</p>...<p><b>本日のよかったこと</b></p><ul><li>...</li></ul>"}}
 {memo_section}
@@ -583,6 +584,29 @@ def notify_telegram_error(message: str) -> None:
             json.loads(res.read())
     except Exception as e:
         print(f"  [WARN] Telegram エラー通知失敗: {e}")
+
+
+def normalize_for_legacy_encoding(text: str) -> str:
+    """EUC-JP / Shift-JIS で表現できない Unicode 文字を近似文字に置換する。
+    Gemini が生成するテキストに含まれる欧文記号をブログ投稿前に正規化する。
+    """
+    replacements = {
+        '\u2013': 'ー',   # en dash → 長音符
+        '\u2014': '―',   # em dash → 水平線（JIS X 0208 に存在）
+        '\u2015': '―',   # horizontal bar（念のため）
+        '\u2018': "'",   # left single quotation mark
+        '\u2019': "'",   # right single quotation mark
+        '\u201c': '"',   # left double quotation mark
+        '\u201d': '"',   # right double quotation mark
+        '\u2022': '・',  # bullet → 中点
+        '\u00b7': '・',  # middle dot → 中点
+        '\u00d7': '×',  # multiplication sign（JIS X 0208 に存在）
+        '\u00f7': '÷',  # division sign（JIS X 0208 に存在）
+        '\u00a0': ' ',   # non-breaking space → 通常スペース
+    }
+    for char, replacement in replacements.items():
+        text = text.replace(char, replacement)
+    return text
 
 
 JUGEM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -683,6 +707,10 @@ def post_to_jugem(title: str, body: str) -> str:
             return text, res.geturl()
 
     def do_post(url, params, encoding="utf-8", extra_headers=None):
+        # EUC-JP / Shift-JIS の場合、表現できない Unicode 文字を正規化してからエンコード
+        if encoding in ("euc-jp", "euc_jp", "shift_jis", "shift-jis"):
+            params = {k: normalize_for_legacy_encoding(v) if isinstance(v, str) else v
+                      for k, v in params.items()}
         data = urllib.parse.urlencode(params, encoding=encoding).encode('ascii')
         h = {
             "User-Agent": JUGEM_UA,
