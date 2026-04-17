@@ -27,6 +27,11 @@ on:
         required: false
         default: "false"
         type: boolean
+      skip_duplicate_check:
+        description: "SKIP_DUPLICATE_CHECK: 既投稿チェックをスキップして強制投稿"
+        required: false
+        default: "false"
+        type: boolean
 
 jobs:
   post:
@@ -49,8 +54,9 @@ jobs:
           GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
           JUGEM_USER:       ${{ secrets.JUGEM_USER }}
           JUGEM_PASS:       ${{ secrets.JUGEM_PASS }}
-          TEST_MODE:        ${{ inputs.test_mode || 'false' }}
-          DEBUG_MODE:       ${{ inputs.debug_mode || 'false' }}
+          TEST_MODE:              ${{ inputs.test_mode || 'false' }}
+          DEBUG_MODE:             ${{ inputs.debug_mode || 'false' }}
+          SKIP_DUPLICATE_CHECK:   ${{ inputs.skip_duplicate_check || 'false' }}
           WEATHER_LOCATION: ${{ vars.WEATHER_LOCATION }}
           GITHUB_USERNAME:  ${{ github.repository_owner }}
           GH_API_TOKEN:     ${{ secrets.GITHUB_TOKEN }}

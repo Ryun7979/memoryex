@@ -11,6 +11,7 @@ import http.cookiejar
 import urllib.request
 import urllib.error
 import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
 # ── 設定 ────────────────────────────────────────────────
@@ -293,6 +294,34 @@ def reverse_geocode(lat: float, lon: float) -> str:
         return ""
 
 
+def get_news_headlines(count: int = 5) -> list[dict]:
+    """Yahoo!ニュース RSS から上位 n 件のヘッドラインを取得する。"""
+    url = "https://news.yahoo.co.jp/rss/topics/top-picks.xml"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; memoryex/1.0)"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            raw = res.read()
+        root = ET.fromstring(raw)
+        items: list[dict] = []
+        for item in root.findall(".//item"):
+            title = (item.findtext("title") or "").strip()
+            link  = (item.findtext("link")  or "").strip()
+            desc  = (item.findtext("description") or "").strip()
+            # description に HTML タグが含まれる場合は除去
+            desc  = re.sub(r"<[^>]+>", "", desc).strip()
+            if title and link:
+                items.append({"title": title, "url": link, "description": desc})
+            if len(items) >= count:
+                break
+        return items
+    except Exception as e:
+        print(f"  [WARN] ニュース取得失敗: {e}")
+        return []
+
+
 def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
     """Telegram から今日（JST）送ったメッセージとURL情報を取得する。"""
     url = (
@@ -386,10 +415,11 @@ def format_with_gemini(
     url_summaries: list[dict] = [],
     location_names: list[str] = [],
     movie_infos: list[dict] = [],
+    news_headlines: list[dict] = [],
 ) -> dict:
     """Gemini API でメモをブログ記事に整形する。"""
-    combined = "\n".join(f"・{m}" for m in messages)
     today_str = datetime.now(JST).strftime("%Y年%-m月%-d日")
+    has_memo = bool(messages)
 
     # 追加情報セクションを構築
     extra_sections = ""
@@ -422,17 +452,20 @@ def format_with_gemini(
                 line += f" — {m['overview']}"
             lines.append(line)
         extra_sections += "\n【鑑賞した映画】\n" + "\n".join(lines) + "\n"
+    if news_headlines:
+        lines = []
+        for n in news_headlines:
+            line = f"・{n['title']}"
+            if n.get("description"):
+                line += f"\n  概要: {n['description']}"
+            line += f"\n  URL: {n['url']}"
+            lines.append(line)
+        extra_sections += "\n【本日のニュース】\n" + "\n".join(lines) + "\n"
 
-    prompt = f"""\
-以下は{today_str}の日常メモと補足情報です。これをブログ記事としてまとめてください。
-
-【用語の解釈】
-- コスパ → スポーツクラブでの運動
-- ブラサカ → ブラインドサッカー（子どもの習い事）
-- みやこきっず → 合唱（子どもの習い事）
-- まーちゃん → 妻
-
-【要件】
+    if has_memo:
+        combined = "\n".join(f"・{m}" for m in messages)
+        memo_section = f"\n【メモ】\n{combined}\n"
+        requirements = """\
 - 【メモ】に含まれる内容は全て記事に反映する。一部だけを取り上げて他を省略しない
 - メモの内容を自然な日記文に仕上げる。過度な装飾・大げさな表現・接続詞の多用は避ける
 - 話題が変わるごとに <p> タグで段落を分け、読みやすくする
@@ -441,18 +474,37 @@ def format_with_gemini(
 - 【共有URL】がある場合は、本文とは別に「本日の気になったインターネット」セクションを設ける
   - 形式: <p><b>本日の気になったインターネット</b></p><ul><li><a href="URL">タイトル</a> — 紹介文</li>...</ul>
 - カレンダーの予定はあくまで補足。メモが主役
-- カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える
+- カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える"""
+    else:
+        memo_section = ""
+        requirements = """\
+- 【メモ】がないため、天気・予定・ニュースを中心にまとめる
+- 天気や予定は短く触れる程度でよい
+- 【本日のニュース】がある場合は「本日のニュースピックアップ」セクションを設ける
+  - 形式: <p><b>本日のニュースピックアップ</b></p><ul><li><a href="URL">タイトル</a> — 概要</li>...</ul>
+  - ニュースは事実のみ掲載し、個人的な意見や感想は加えない
+- カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える"""
+
+    prompt = f"""\
+以下は{today_str}の情報です。これをブログ記事としてまとめてください。
+
+【用語の解釈】
+- コスパ → スポーツクラブでの運動
+- ブラサカ → ブラインドサッカー（子どもの習い事）
+- みやこきっず → 合唱（子どもの習い事）
+- まーちゃん → 妻
+
+【要件】
+{requirements}
 - ポジティブな出来事は少しだけ前向きに表現してよいが、大げさにしない
 - タイトルは 20 字以内で簡潔に
 - 本文の末尾に「本日のよかったこと」セクションを必ず追加する
-  - メモ・補足情報からポジティブな要素を 3 つ選び、なければ小さなことでも前向きに解釈して補う
+  - ポジティブな要素を 3 つ選び、なければ小さなことでも前向きに解釈して補う
   - 形式: <p><b>本日のよかったこと</b></p><ul><li>...</li><li>...</li><li>...</li></ul>
 - マークダウン不可
 - 必ず以下の JSON 形式のみで返す（コードブロック不要）:
 {{"title": "記事タイトル", "body": "<h3>...</h3><p>...</p>...<p><b>本日のよかったこと</b></p><ul><li>...</li></ul>"}}
-
-【メモ】
-{combined}
+{memo_section}
 {extra_sections}"""
 
     payload = json.dumps({
@@ -810,23 +862,28 @@ def main():
         # 1. Telegram からメモ取得
         print("📨 Telegram からメッセージを取得中...")
         messages, url_summaries, location_names, movie_infos, target_date = get_today_messages()
-        if not messages:
-            print("⚠️  今日のメモが見つかりませんでした。投稿をスキップします。")
-            return
 
         # 既に今日の投稿が完了していればスキップ（30分おきの重複実行対策）
-        print("\n🔍 JUGEM 既投稿チェック中...")
-        if check_jugem_already_posted(target_date):
-            return
-        print(f"✅  {len(messages)} 件取得:")
-        for i, m in enumerate(messages, 1):
-            print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
-        if url_summaries:
-            print(f"   URL: {len(url_summaries)} 件取得")
-        if location_names:
-            print(f"   位置情報: {len(location_names)} 件取得")
-        if movie_infos:
-            print(f"   映画: {len(movie_infos)} 件取得")
+        skip_dup = os.environ.get("SKIP_DUPLICATE_CHECK", "").lower() in ("1", "true", "yes")
+        if skip_dup:
+            print("\n⚠️  SKIP_DUPLICATE_CHECK が有効なため、既投稿チェックをスキップします。")
+        else:
+            print("\n🔍 JUGEM 既投稿チェック中...")
+            if check_jugem_already_posted(target_date):
+                return
+
+        if messages:
+            print(f"✅  {len(messages)} 件取得:")
+            for i, m in enumerate(messages, 1):
+                print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
+            if url_summaries:
+                print(f"   URL: {len(url_summaries)} 件取得")
+            if location_names:
+                print(f"   位置情報: {len(location_names)} 件取得")
+            if movie_infos:
+                print(f"   映画: {len(movie_infos)} 件取得")
+        else:
+            print("📰 今日のメモなし。ニュースピックアップ記事を生成します。")
 
         # 2. 補足情報を収集
         print("\n🌤️  補足情報を収集中...")
@@ -840,9 +897,19 @@ def main():
         if gcal_events:
             print(f"   カレンダー: {len(gcal_events)} 件")
 
+        # メモなしの場合はニュースを取得
+        news_headlines: list[dict] = []
+        if not messages:
+            print("📰 Yahoo!ニュース取得中...")
+            news_headlines = get_news_headlines(5)
+            print(f"   ニュース: {len(news_headlines)} 件取得")
+
         # 3. Gemini で整形
         print("\n🤖 Gemini で記事を生成中...")
-        article = format_with_gemini(messages, weather, github_activity, gcal_events, url_summaries, location_names, movie_infos)
+        article = format_with_gemini(
+            messages, weather, github_activity, gcal_events,
+            url_summaries, location_names, movie_infos, news_headlines,
+        )
         title = article["title"]
         body  = article["body"]
         print(f"✅  タイトル: {title}")
