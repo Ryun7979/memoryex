@@ -221,13 +221,17 @@ def fetch_movie_info(title: str) -> dict:
     """TMDB API で映画情報を取得する。"""
     if not TMDB_API_KEY:
         return {"title": title}
+    tmdb_headers = {
+        "User-Agent": "memoryex/1.0",
+        "Authorization": f"Bearer {TMDB_API_KEY}",
+    }
     # 映画検索
     search_url = (
         f"https://api.themoviedb.org/3/search/movie"
-        f"?api_key={TMDB_API_KEY}&query={urllib.parse.quote(title)}&language=ja&page=1"
+        f"?query={urllib.parse.quote(title)}&language=ja&page=1"
     )
     try:
-        req = urllib.request.Request(search_url, headers={"User-Agent": "memoryex/1.0"})
+        req = urllib.request.Request(search_url, headers=tmdb_headers)
         with urllib.request.urlopen(req, timeout=10) as res:
             results = json.loads(res.read()).get("results", [])
         if not results:
@@ -237,9 +241,9 @@ def fetch_movie_info(title: str) -> dict:
         # 映画詳細（上映時間・ジャンル）を取得
         detail_url = (
             f"https://api.themoviedb.org/3/movie/{movie_id}"
-            f"?api_key={TMDB_API_KEY}&language=ja"
+            f"?language=ja"
         )
-        req2 = urllib.request.Request(detail_url, headers={"User-Agent": "memoryex/1.0"})
+        req2 = urllib.request.Request(detail_url, headers=tmdb_headers)
         with urllib.request.urlopen(req2, timeout=10) as res2:
             detail = json.loads(res2.read())
         runtime = detail.get("runtime")  # 分
@@ -461,24 +465,27 @@ def format_with_gemini(
     for model in GEMINI_MODELS:
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model}:generateContent?key={GEMINI_API_KEY}"
+            f"{model}:generateContent"
         )
         req = urllib.request.Request(
             url, data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": GEMINI_API_KEY,
+            },
             method="POST"
         )
         print(f"  Gemini モデル: {model}")
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 with urllib.request.urlopen(req, timeout=30) as res:
                     data = json.loads(res.read())
                 break
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode()
-                if e.code in (429, 503) and attempt < 2:
-                    wait = 30 * (attempt + 1)
-                    print(f"  Gemini {e.code} 一時エラー。{wait}秒待機後リトライ ({attempt+1}/2)...")
+                if e.code in (429, 503) and attempt < 4:
+                    wait = 30 * (attempt + 1)  # 30, 60, 90, 120 秒
+                    print(f"  Gemini {e.code} 一時エラー。{wait}秒待機後リトライ ({attempt+1}/4)...")
                     time.sleep(wait)
                     continue
                 last_error = RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
@@ -504,30 +511,116 @@ def format_with_gemini(
         raise RuntimeError(f"Gemini レスポンスの JSON パース失敗: {e}\n{raw_text}")
 
 
-def post_to_jugem(title: str, body: str) -> str:
-    """JUGEM ブログ管理画面フォームで記事を投稿する。"""
+def notify_telegram_error(message: str) -> None:
+    """エラー発生時に Telegram へ失敗通知を送る。"""
+    payload = json.dumps({
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text":    f"⚠️ ブログ自動投稿 失敗\n\n{message}",
+    }).encode()
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as res:
+            json.loads(res.read())
+    except Exception as e:
+        print(f"  [WARN] Telegram エラー通知失敗: {e}")
+
+
+JUGEM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36")
+
+
+def jugem_login() -> tuple:
+    """JUGEM にログインし (opener, manage_base_url) を返す。"""
     jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    # CSRF トークン取得
+    req = urllib.request.Request(
+        "https://jugem.jp/login", headers={"User-Agent": JUGEM_UA})
+    with opener.open(req, timeout=20) as res:
+        login_html = res.read().decode("utf-8", errors="ignore")
+    token_m = (
+        re.search(r'<input[^>]+name=["\']_token["\'][^>]+value=["\']([^"\']+)["\']', login_html)
+        or re.search(r'<input[^>]+value=["\']([^"\']+)["\'][^>]+name=["\']_token["\']', login_html)
+    )
+    csrf_token = token_m.group(1) if token_m else ""
+    if not csrf_token:
+        for c in jar:
+            if c.name == "XSRF-TOKEN":
+                csrf_token = urllib.parse.unquote(c.value)
+                break
+    # ログイン POST
+    data = urllib.parse.urlencode({
+        "_token": csrf_token, "account_name": JUGEM_USER,
+        "password": JUGEM_PASS, "is_sub_user": "0",
+        "redirect_url": "", "isSavePass": "0",
+    }).encode()
+    req = urllib.request.Request(
+        "https://jugem.jp/login", data=data,
+        headers={"User-Agent": JUGEM_UA,
+                 "Content-Type": "application/x-www-form-urlencoded",
+                 "Referer": "https://jugem.jp/login"},
+        method="POST"
+    )
+    with opener.open(req, timeout=20) as res:
+        manage_url = res.geturl()
+    if "jugem.jp/login" in manage_url:
+        raise RuntimeError(f"JUGEM ログイン失敗（ログインページに留まった）: {manage_url}")
+    manage_base = manage_url.split("?")[0]
+    return opener, manage_base
 
-    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-          "AppleWebKit/537.36 (KHTML, like Gecko) "
-          "Chrome/124.0.0.0 Safari/537.36")
+
+def _decode_jugem_response(raw: bytes, content_type: str) -> str:
+    """JUGEM レスポンスを Content-Type に応じてデコードする。"""
+    ct = content_type.lower()
+    if "shift_jis" in ct or "shift-jis" in ct:
+        return raw.decode("shift_jis", errors="replace")
+    if "euc" in ct:
+        return raw.decode("euc-jp", errors="replace")
+    return raw.decode("utf-8", errors="ignore")
+
+
+def check_jugem_already_posted(target_date) -> bool:
+    """JUGEM の記事一覧を確認し、対象日の投稿が既にあれば True を返す。"""
+    try:
+        opener, manage_base = jugem_login()
+        req = urllib.request.Request(
+            f"{manage_base}?mode=entry",
+            headers={"User-Agent": JUGEM_UA}
+        )
+        with opener.open(req, timeout=20) as res:
+            list_html = _decode_jugem_response(
+                res.read(), res.headers.get("Content-Type", ""))
+        date_str = target_date.strftime("%Y.%m.%d")
+        if date_str in list_html:
+            print(f"  ✅ {date_str} の投稿が既に存在します。スキップします。")
+            return True
+        return False
+    except Exception as e:
+        print(f"  [WARN] 既投稿チェック失敗（スキップして続行）: {e}")
+        return False
+
+
+def post_to_jugem(title: str, body: str) -> str:
+    """JUGEM ブログ管理画面フォームで記事を投稿する。"""
+    opener, manage_base = jugem_login()
+    print(f"  → ログイン成功: {manage_base}")
 
     def do_get(url):
         req = urllib.request.Request(url, headers={
-            "User-Agent": UA,
+            "User-Agent": JUGEM_UA,
             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
             "Accept-Language": "ja,en;q=0.9",
         })
         with opener.open(req, timeout=20) as res:
             raw = res.read()
             ct = res.headers.get("Content-Type", "")
-            if "shift_jis" in ct.lower() or "shift-jis" in ct.lower():
-                text = raw.decode("shift_jis", errors="replace")
-            elif "euc" in ct.lower():
-                text = raw.decode("euc-jp", errors="replace")
-            else:
-                text = raw.decode("utf-8", errors="ignore")
+            text = _decode_jugem_response(raw, ct)
             if DEBUG:
                 print(f"  [DEBUG] GET {url}")
                 print(f"  [DEBUG]   → final: {res.geturl()}")
@@ -537,7 +630,7 @@ def post_to_jugem(title: str, body: str) -> str:
     def do_post(url, params, encoding="utf-8", extra_headers=None):
         data = urllib.parse.urlencode(params, encoding=encoding).encode('ascii')
         h = {
-            "User-Agent": UA,
+            "User-Agent": JUGEM_UA,
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
             "Accept-Language": "ja,en;q=0.9",
@@ -551,57 +644,14 @@ def post_to_jugem(title: str, body: str) -> str:
         with opener.open(req, timeout=20) as res:
             raw = res.read()
             ct = res.headers.get("Content-Type", "")
-            if "shift_jis" in ct.lower() or "shift-jis" in ct.lower():
-                text = raw.decode("shift_jis", errors="replace")
-            elif "euc" in ct.lower():
-                text = raw.decode("euc-jp", errors="replace")
-            else:
-                text = raw.decode("utf-8", errors="ignore")
+            text = _decode_jugem_response(raw, ct)
             if DEBUG:
                 print(f"  [DEBUG]   → final: {res.geturl()}")
                 print(f"  [DEBUG]   → Content-Type: {ct}")
                 print(f"  [DEBUG]   → body[:500]: {text[:500]!r}")
             return text, res.geturl()
 
-    # ── 1. jugem.jp/login を GET して CSRF トークンを取得 ──
-    login_html, _ = do_get("https://jugem.jp/login")
-    token_m = (
-        re.search(r'<input[^>]+name=["\']_token["\'][^>]+value=["\']([^"\']+)["\']', login_html)
-        or re.search(r'<input[^>]+value=["\']([^"\']+)["\'][^>]+name=["\']_token["\']', login_html)
-    )
-    if token_m:
-        csrf_token = token_m.group(1)
-    else:
-        csrf_token = None
-        for c in jar:
-            if c.name == "XSRF-TOKEN":
-                csrf_token = urllib.parse.unquote(c.value)
-                break
-    if DEBUG:
-        print(f"  [DEBUG] csrf_token={'(取得済み)' if csrf_token else '(未取得)'}")
-
-    # ── 2. jugem.jp/login に POST してログイン（jugem.jp は UTF-8）──
-    # フォームフィールド: _token, account_name, password, is_sub_user, redirect_url, isSavePass
-    print("  → JUGEM ログイン中...")
-    resp, final = do_post(
-        "https://jugem.jp/login",
-        {
-            "_token":       csrf_token or "",
-            "account_name": JUGEM_USER,
-            "password":     JUGEM_PASS,
-            "is_sub_user":  "0",
-            "redirect_url": "",
-            "isSavePass":   "0",
-        },
-        encoding="utf-8",
-        extra_headers={"Referer": "https://jugem.jp/login"},
-    )
-    if "jugem.jp/login" in final:
-        raise RuntimeError(f"JUGEM ログイン失敗（ログインページに留まった）: {final}")
-    print(f"  → ログイン成功: {final}")
-
-    # ── 3. 記事投稿フォームを取得（rich view: csrf_token が含まれる）──
-    manage_base = final.split("?")[0]  # https://nadaryu.jugem.cc/manage/
+    # ── 記事投稿フォームを取得（rich view: csrf_token が含まれる）──
     entry_html, entry_final = do_get(f"{manage_base}?mode=entry&view=rich")
     if "jugem.jp/login" in entry_final:
         raise RuntimeError(f"セッション未確立: {entry_final}")
@@ -763,6 +813,11 @@ def main():
         if not messages:
             print("⚠️  今日のメモが見つかりませんでした。投稿をスキップします。")
             return
+
+        # 既に今日の投稿が完了していればスキップ（30分おきの重複実行対策）
+        print("\n🔍 JUGEM 既投稿チェック中...")
+        if check_jugem_already_posted(target_date):
+            return
         print(f"✅  {len(messages)} 件取得:")
         for i, m in enumerate(messages, 1):
             print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
@@ -806,4 +861,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        msg = str(e)
+        print(f"\n❌ 致命的エラー: {msg}")
+        notify_telegram_error(msg[:300])
+        raise
