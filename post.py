@@ -670,20 +670,32 @@ def _decode_jugem_response(raw: bytes, content_type: str) -> str:
 
 
 def check_jugem_already_posted(target_date) -> bool:
-    """JUGEM の記事一覧を確認し、対象日の投稿が既にあれば True を返す。"""
+    """JUGEM の RSS フィードを確認し、対象日の投稿が既にあれば True を返す。
+    管理画面 HTML の文字列照合より確実（RSS は構造化データで日付フォーマットが標準的）。
+    """
     try:
         opener, manage_base = jugem_login()
-        req = urllib.request.Request(
-            f"{manage_base}?mode=entry",
-            headers={"User-Agent": JUGEM_UA}
-        )
-        with opener.open(req, timeout=20) as res:
-            list_html = _decode_jugem_response(
-                res.read(), res.headers.get("Content-Type", ""))
-        date_str = target_date.strftime("%Y.%m.%d")
-        if date_str in list_html:
-            print(f"  ✅ {date_str} の投稿が既に存在します。スキップします。")
-            return True
+        # manage_base: https://xxx.jugem.cc/manage/ → https://xxx.jugem.cc/
+        blog_base = manage_base.rstrip("/").rsplit("/manage", 1)[0]
+        rss_url = f"{blog_base}/?mode=rss"
+        req = urllib.request.Request(rss_url, headers={"User-Agent": JUGEM_UA})
+        with opener.open(req, timeout=10) as res:
+            raw = res.read()
+        # XML はバイト列のまま ET に渡す（エンコーディング宣言を正しく処理するため）
+        root = ET.fromstring(raw)
+        for item in root.findall(".//item"):
+            pub_date_str = (item.findtext("pubDate") or "").strip()
+            if not pub_date_str:
+                continue
+            try:
+                # RSS pubDate 形式: "Thu, 17 Apr 2026 23:00:00 +0900"
+                dt = datetime.strptime(pub_date_str, "%a, %d %b %Y %H:%M:%S %z")
+                if dt.astimezone(JST).date() == target_date:
+                    print(f"  ✅ {target_date} の投稿が既に存在します。スキップします。")
+                    return True
+            except ValueError:
+                if DEBUG:
+                    print(f"  [DEBUG] RSS 日付パース失敗: {pub_date_str!r}")
         return False
     except Exception as e:
         print(f"  [WARN] 既投稿チェック失敗（スキップして続行）: {e}")
