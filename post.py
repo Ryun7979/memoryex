@@ -720,7 +720,18 @@ def check_jugem_already_posted(target_date) -> bool:
     except Exception as e:
         print(f"  [WARN] RSS チェック失敗: {e}")
 
+    # 日付パターン（方法2・3・4 で共用）
+    date_patterns = [
+        target_date.strftime("%Y.%m.%d"),      # 2026.04.17
+        target_date.strftime("%Y/%m/%d"),      # 2026/04/17
+        target_date.strftime("%Y-%m-%d"),      # 2026-04-17
+        target_date.strftime("%Y年%m月%d日"),   # 2026年04月17日（ゼロ埋め）
+        target_date.strftime("%Y年%-m月%-d日"), # 2026年4月17日（ゼロなし）
+        target_date.strftime("%-m月%-d日"),    # 4月17日
+    ]
+
     # ── 方法2: 管理画面記事一覧で確認（RSS が使えない場合の保険）──
+    list_html = ""
     try:
         req = urllib.request.Request(
             f"{manage_base}?mode=entry",
@@ -729,22 +740,60 @@ def check_jugem_already_posted(target_date) -> bool:
         with opener.open(req, timeout=20) as res:
             list_html = _decode_jugem_response(res.read(), res.headers.get("Content-Type", ""))
         # JUGEM の管理画面で使われる可能性のある日付フォーマットを全て試す
-        date_patterns = [
-            target_date.strftime("%Y.%m.%d"),      # 2026.04.17
-            target_date.strftime("%Y/%m/%d"),      # 2026/04/17
-            target_date.strftime("%Y-%m-%d"),      # 2026-04-17
-            target_date.strftime("%Y年%m月%d日"),   # 2026年04月17日（ゼロ埋め）
-            target_date.strftime("%Y年%-m月%-d日"), # 2026年4月17日（ゼロなし）
-            target_date.strftime("%-m月%-d日"),    # 4月17日
-        ]
         for pattern in date_patterns:
             if pattern in list_html:
                 print(f"  ✅ {target_date} の投稿が既に存在します（管理画面）。スキップします。")
                 return True
         if DEBUG:
             print(f"  [DEBUG] 管理画面チェック: 対象パターン未検出 ({', '.join(date_patterns)})")
+            print(f"  [DEBUG] 管理画面HTML（先頭3000文字）:\n{list_html[:3000]}")
     except Exception as e:
         print(f"  [WARN] 管理画面チェック失敗: {e}")
+
+    # ── 方法3: 管理画面の最新記事詳細で確認（一覧の日付フォーマット問題の回避）──
+    try:
+        # 一覧HTMLから eid を全部拾い、最大値（最新）から5件確認する
+        eids_in_list = sorted(
+            set(int(e) for e in re.findall(r'eid=(\d+)', list_html)),
+            reverse=True
+        )[:5]
+        if DEBUG:
+            print(f"  [DEBUG] 管理画面 eid 一覧（上位5件）: {eids_in_list}")
+        for eid in eids_in_list:
+            req = urllib.request.Request(
+                f"{manage_base}?mode=entry&eid={eid}",
+                headers={"User-Agent": JUGEM_UA}
+            )
+            with opener.open(req, timeout=15) as res:
+                detail_html = _decode_jugem_response(res.read(), res.headers.get("Content-Type", ""))
+            for pattern in date_patterns:
+                if pattern in detail_html:
+                    print(f"  ✅ {target_date} の投稿が既に存在します（記事詳細 eid={eid}）。スキップします。")
+                    return True
+            if DEBUG:
+                print(f"  [DEBUG] eid={eid} 詳細: パターン未検出")
+                print(f"  [DEBUG] eid={eid} 詳細HTML（先頭1500文字）:\n{detail_html[:1500]}")
+    except Exception as e:
+        print(f"  [WARN] 記事詳細チェック失敗: {e}")
+
+    # ── 方法4: 公開ブログ top ページで確認 ──
+    try:
+        blog_base_url = manage_base.rstrip("/").rsplit("/manage", 1)[0]
+        req = urllib.request.Request(
+            f"{blog_base_url}/",
+            headers={"User-Agent": JUGEM_UA}
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            public_html = _decode_jugem_response(res.read(), res.headers.get("Content-Type", ""))
+        for pattern in date_patterns:
+            if pattern in public_html:
+                print(f"  ✅ {target_date} の投稿が既に存在します（公開ブログ）。スキップします。")
+                return True
+        if DEBUG:
+            print(f"  [DEBUG] 公開ブログチェック: 対象パターン未検出")
+            print(f"  [DEBUG] 公開ブログHTML（先頭2000文字）:\n{public_html[:2000]}")
+    except Exception as e:
+        print(f"  [WARN] 公開ブログチェック失敗: {e}")
 
     print(f"  （{target_date} の投稿なし。投稿を続行します。）")
     return False
