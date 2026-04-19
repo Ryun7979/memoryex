@@ -669,135 +669,6 @@ def _decode_jugem_response(raw: bytes, content_type: str) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
-def check_jugem_already_posted(target_date) -> bool:
-    """JUGEM に対象日の投稿が既に存在するか確認する。
-    RSS フィード（XML パース）と管理画面記事一覧（テキスト照合）の両方をチェック。
-    どちらかが True なら投稿済みとみなす。
-    """
-    try:
-        opener, manage_base = jugem_login()
-    except Exception as e:
-        print(f"  [WARN] 既投稿チェック: ログイン失敗（スキップして続行）: {e}")
-        return False
-
-    # ── 方法1: RSS フィードで確認 ──
-    try:
-        blog_base = manage_base.rstrip("/").rsplit("/manage", 1)[0]
-        rss_url = f"{blog_base}/?mode=rss"
-        req = urllib.request.Request(rss_url, headers={"User-Agent": JUGEM_UA})
-        with opener.open(req, timeout=10) as res:
-            raw = res.read()
-        root = ET.fromstring(raw)
-        items = root.findall(".//item")
-        print(f"  （RSS: {len(items)} 件取得）")
-        for item in items:
-            pub_date_str = (item.findtext("pubDate") or "").strip()
-            if not pub_date_str:
-                continue
-            dt = None
-            for fmt in [
-                "%a, %d %b %Y %H:%M:%S %z",   # RFC 822: "Thu, 17 Apr 2026 23:00:00 +0900"
-                "%Y-%m-%dT%H:%M:%S%z",         # ISO 8601
-                "%Y-%m-%d %H:%M:%S",           # "2026-04-17 23:00:00"
-                "%Y-%m-%d",                    # "2026-04-17"
-            ]:
-                try:
-                    dt = datetime.strptime(pub_date_str, fmt)
-                    break
-                except ValueError:
-                    continue
-            if dt is None:
-                print(f"  [WARN] RSS 日付パース失敗（未知のフォーマット）: {pub_date_str!r}")
-                continue
-            if not dt.tzinfo:
-                dt = dt.replace(tzinfo=JST)
-            post_date = dt.astimezone(JST).date()
-            if DEBUG:
-                print(f"  [DEBUG] RSS 記事日付: {post_date}")
-            if post_date == target_date:
-                print(f"  ✅ {target_date} の投稿が既に存在します（RSS）。スキップします。")
-                return True
-    except Exception as e:
-        print(f"  [WARN] RSS チェック失敗: {e}")
-
-    # 日付パターン（方法2・3・4 で共用）
-    date_patterns = [
-        target_date.strftime("%Y.%m.%d"),      # 2026.04.17
-        target_date.strftime("%Y/%m/%d"),      # 2026/04/17
-        target_date.strftime("%Y-%m-%d"),      # 2026-04-17
-        target_date.strftime("%Y年%m月%d日"),   # 2026年04月17日（ゼロ埋め）
-        target_date.strftime("%Y年%-m月%-d日"), # 2026年4月17日（ゼロなし）
-        target_date.strftime("%-m月%-d日"),    # 4月17日
-    ]
-
-    # ── 方法2: 管理画面記事一覧で確認（RSS が使えない場合の保険）──
-    list_html = ""
-    try:
-        req = urllib.request.Request(
-            f"{manage_base}?mode=entry",
-            headers={"User-Agent": JUGEM_UA}
-        )
-        with opener.open(req, timeout=20) as res:
-            list_html = _decode_jugem_response(res.read(), res.headers.get("Content-Type", ""))
-        # JUGEM の管理画面で使われる可能性のある日付フォーマットを全て試す
-        for pattern in date_patterns:
-            if pattern in list_html:
-                print(f"  ✅ {target_date} の投稿が既に存在します（管理画面）。スキップします。")
-                return True
-        if DEBUG:
-            print(f"  [DEBUG] 管理画面チェック: 対象パターン未検出 ({', '.join(date_patterns)})")
-            print(f"  [DEBUG] 管理画面HTML（先頭3000文字）:\n{list_html[:3000]}")
-    except Exception as e:
-        print(f"  [WARN] 管理画面チェック失敗: {e}")
-
-    # ── 方法3: 管理画面の最新記事詳細で確認（一覧の日付フォーマット問題の回避）──
-    try:
-        # 一覧HTMLから eid を全部拾い、最大値（最新）から5件確認する
-        eids_in_list = sorted(
-            set(int(e) for e in re.findall(r'eid=(\d+)', list_html)),
-            reverse=True
-        )[:5]
-        if DEBUG:
-            print(f"  [DEBUG] 管理画面 eid 一覧（上位5件）: {eids_in_list}")
-        for eid in eids_in_list:
-            req = urllib.request.Request(
-                f"{manage_base}?mode=entry&eid={eid}",
-                headers={"User-Agent": JUGEM_UA}
-            )
-            with opener.open(req, timeout=15) as res:
-                detail_html = _decode_jugem_response(res.read(), res.headers.get("Content-Type", ""))
-            for pattern in date_patterns:
-                if pattern in detail_html:
-                    print(f"  ✅ {target_date} の投稿が既に存在します（記事詳細 eid={eid}）。スキップします。")
-                    return True
-            if DEBUG:
-                print(f"  [DEBUG] eid={eid} 詳細: パターン未検出")
-                print(f"  [DEBUG] eid={eid} 詳細HTML（先頭1500文字）:\n{detail_html[:1500]}")
-    except Exception as e:
-        print(f"  [WARN] 記事詳細チェック失敗: {e}")
-
-    # ── 方法4: 公開ブログ top ページで確認 ──
-    try:
-        blog_base_url = manage_base.rstrip("/").rsplit("/manage", 1)[0]
-        req = urllib.request.Request(
-            f"{blog_base_url}/",
-            headers={"User-Agent": JUGEM_UA}
-        )
-        with urllib.request.urlopen(req, timeout=10) as res:
-            public_html = _decode_jugem_response(res.read(), res.headers.get("Content-Type", ""))
-        for pattern in date_patterns:
-            if pattern in public_html:
-                print(f"  ✅ {target_date} の投稿が既に存在します（公開ブログ）。スキップします。")
-                return True
-        if DEBUG:
-            print(f"  [DEBUG] 公開ブログチェック: 対象パターン未検出")
-            print(f"  [DEBUG] 公開ブログHTML（先頭2000文字）:\n{public_html[:2000]}")
-    except Exception as e:
-        print(f"  [WARN] 公開ブログチェック失敗: {e}")
-
-    print(f"  （{target_date} の投稿なし。投稿を続行します。）")
-    return False
-
 
 def post_to_jugem(title: str, body: str) -> str:
     """JUGEM ブログ管理画面フォームで記事を投稿する。"""
@@ -993,84 +864,116 @@ def notify_telegram(title: str, body: str, blog_url: str) -> None:
 
 
 def main():
-    print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===")
+    print(f"=== 実行開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===", flush=True)
 
     test_mode = os.environ.get("TEST_MODE", "").lower() in ("1", "true", "yes")
-    gcal_events: list[str] = []
-    messages:    list[str] = []
 
+    # ── TEST_MODE: 1回だけ固定文字列で投稿して終了 ──
     if test_mode:
         print("🔧 TEST_MODE: Telegram/Gemini をスキップして固定文字列で投稿します。")
         title = "テスト投稿"
         body  = "<p>これは接続確認用のテスト投稿です。自動投稿スクリプトから送信されました。</p>"
-    else:
-        # 1. Telegram からメモ取得
-        print("📨 Telegram からメッセージを取得中...")
-        messages, url_summaries, location_names, movie_infos, target_date = get_today_messages()
+        post_id = post_to_jugem(title, body)
+        blog_url = f"https://nadaryu.jugem.cc/?eid={post_id}"
+        print(f"✅  投稿完了！ post_id = {post_id}")
+        print(f"   URL: {blog_url}")
+        notify_telegram(title, body, blog_url)
+        print("✅  Telegram 通知完了")
+        return
 
-        # 既に今日の投稿が完了していればスキップ（30分おきの重複実行対策）
-        skip_dup = os.environ.get("SKIP_DUPLICATE_CHECK", "").lower() in ("1", "true", "yes")
-        if skip_dup:
-            print("\n⚠️  SKIP_DUPLICATE_CHECK が有効なため、既投稿チェックをスキップします。")
-        else:
-            print("\n🔍 JUGEM 既投稿チェック中...")
-            if check_jugem_already_posted(target_date):
-                return
+    # ── 通常モード: 02:00 JST までリトライループ ──
+    now = datetime.now(JST)
+    today_2am = datetime(now.year, now.month, now.day, 2, 0, 0, tzinfo=JST)
+    # 23:00 JST 起動なので締切は翌日 02:00（当日 02:00 はすでに過去）
+    deadline = today_2am if now < today_2am else today_2am + timedelta(days=1)
+    print(f"  投稿締切: {deadline.strftime('%Y-%m-%d %H:%M JST')}", flush=True)
 
-        if messages:
-            print(f"✅  {len(messages)} 件取得:")
-            for i, m in enumerate(messages, 1):
-                print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
-            if url_summaries:
-                print(f"   URL: {len(url_summaries)} 件取得")
-            if location_names:
-                print(f"   位置情報: {len(location_names)} 件取得")
-            if movie_infos:
-                print(f"   映画: {len(movie_infos)} 件取得")
-        else:
-            print("📰 今日のメモなし。ニュースピックアップ記事を生成します。")
+    last_error: str = ""
+    attempt = 0
+    while True:
+        now = datetime.now(JST)
+        if now >= deadline:
+            raise RuntimeError(
+                f"02:00 JST までに投稿できませんでした（{attempt} 回試行）。"
+                + (f" 最後のエラー: {last_error}" if last_error else "")
+            )
 
-        # 2. 補足情報を収集
-        print("\n🌤️  補足情報を収集中...")
-        weather = get_weather(WEATHER_LOCATION)
-        if weather:
-            print(f"   天気: {weather}")
-        github_activity = get_github_activity(GITHUB_USERNAME, GH_API_TOKEN)
-        if github_activity:
-            print(f"   GitHub: {len(github_activity)} 件")
-        gcal_events = get_gcal_events(GCAL_CLIENT_ID, GCAL_CLIENT_SECRET, GCAL_REFRESH_TOKEN, target_date)
-        if gcal_events:
-            print(f"   カレンダー: {len(gcal_events)} 件")
+        attempt += 1
+        print(f"\n--- 試行 {attempt} 回目: {now.strftime('%H:%M JST')} ---", flush=True)
 
-        # メモなしの場合はニュースを取得
-        news_headlines: list[dict] = []
-        if not messages:
-            print("📰 Yahoo!ニュース取得中...")
-            news_headlines = get_news_headlines(5)
-            print(f"   ニュース: {len(news_headlines)} 件取得")
+        try:
+            # 1. Telegram からメモ取得
+            print("📨 Telegram からメッセージを取得中...")
+            messages, url_summaries, location_names, movie_infos, target_date = get_today_messages()
 
-        # 3. Gemini で整形
-        print("\n🤖 Gemini で記事を生成中...")
-        article = format_with_gemini(
-            messages, weather, github_activity, gcal_events,
-            url_summaries, location_names, movie_infos, news_headlines,
-            target_date=target_date,
-        )
-        title = article["title"]
-        body  = article["body"]
-        print(f"✅  タイトル: {title}")
+            if messages:
+                print(f"✅  {len(messages)} 件取得:")
+                for i, m in enumerate(messages, 1):
+                    print(f"   {i}. {m[:60]}{'...' if len(m) > 60 else ''}")
+                if url_summaries:
+                    print(f"   URL: {len(url_summaries)} 件取得")
+                if location_names:
+                    print(f"   位置情報: {len(location_names)} 件取得")
+                if movie_infos:
+                    print(f"   映画: {len(movie_infos)} 件取得")
+            else:
+                print("📰 今日のメモなし。ニュースピックアップ記事を生成します。")
 
-    # 3. JUGEM に投稿
-    print("\n📝 JUGEM に投稿中...")
-    post_id = post_to_jugem(title, body)
-    blog_url = f"https://nadaryu.jugem.cc/?eid={post_id}"
-    print(f"✅  投稿完了！ post_id = {post_id}")
-    print(f"   URL: {blog_url}")
+            # 2. 補足情報を収集
+            print("\n🌤️  補足情報を収集中...")
+            weather = get_weather(WEATHER_LOCATION)
+            if weather:
+                print(f"   天気: {weather}")
+            github_activity = get_github_activity(GITHUB_USERNAME, GH_API_TOKEN)
+            if github_activity:
+                print(f"   GitHub: {len(github_activity)} 件")
+            gcal_events = get_gcal_events(GCAL_CLIENT_ID, GCAL_CLIENT_SECRET, GCAL_REFRESH_TOKEN, target_date)
+            if gcal_events:
+                print(f"   カレンダー: {len(gcal_events)} 件")
 
-    # 4. Telegram に記事内容を通知
-    print("\n📨 Telegram に通知中...")
-    notify_telegram(title, body, blog_url)
-    print("✅  Telegram 通知完了")
+            news_headlines: list[dict] = []
+            if not messages:
+                print("📰 Yahoo!ニュース取得中...")
+                news_headlines = get_news_headlines(5)
+                print(f"   ニュース: {len(news_headlines)} 件取得")
+
+            # 3. Gemini で記事生成
+            print("\n🤖 Gemini で記事を生成中...")
+            article = format_with_gemini(
+                messages, weather, github_activity, gcal_events,
+                url_summaries, location_names, movie_infos, news_headlines,
+                target_date=target_date,
+            )
+            title = article["title"]
+            body  = article["body"]
+            print(f"✅  タイトル: {title}")
+
+            # 4. JUGEM に投稿
+            print("\n📝 JUGEM に投稿中...")
+            post_id = post_to_jugem(title, body)
+            blog_url = f"https://nadaryu.jugem.cc/?eid={post_id}"
+            print(f"✅  投稿完了！ post_id = {post_id}")
+            print(f"   URL: {blog_url}")
+
+            # 5. Telegram に通知
+            print("\n📨 Telegram に通知中...")
+            notify_telegram(title, body, blog_url)
+            print("✅  Telegram 通知完了")
+            return  # 成功: ループ終了
+
+        except Exception as e:
+            last_error = str(e)
+            print(f"\n❌ 試行 {attempt} 失敗: {last_error}", flush=True)
+
+            next_time = datetime.now(JST) + timedelta(minutes=30)
+            if next_time >= deadline:
+                raise RuntimeError(
+                    f"試行 {attempt} 回失敗し、次の試行時刻 ({next_time.strftime('%H:%M JST')}) "
+                    f"が締切を超えるため終了します。最後のエラー: {last_error}"
+                )
+
+            print(f"  30分後に再試行します（次回: {next_time.strftime('%H:%M JST')}）...", flush=True)
+            time.sleep(30 * 60)
 
 
 if __name__ == "__main__":
