@@ -670,36 +670,84 @@ def _decode_jugem_response(raw: bytes, content_type: str) -> str:
 
 
 def check_jugem_already_posted(target_date) -> bool:
-    """JUGEM の RSS フィードを確認し、対象日の投稿が既にあれば True を返す。
-    管理画面 HTML の文字列照合より確実（RSS は構造化データで日付フォーマットが標準的）。
+    """JUGEM に対象日の投稿が既に存在するか確認する。
+    RSS フィード（XML パース）と管理画面記事一覧（テキスト照合）の両方をチェック。
+    どちらかが True なら投稿済みとみなす。
     """
     try:
         opener, manage_base = jugem_login()
-        # manage_base: https://xxx.jugem.cc/manage/ → https://xxx.jugem.cc/
+    except Exception as e:
+        print(f"  [WARN] 既投稿チェック: ログイン失敗（スキップして続行）: {e}")
+        return False
+
+    # ── 方法1: RSS フィードで確認 ──
+    try:
         blog_base = manage_base.rstrip("/").rsplit("/manage", 1)[0]
         rss_url = f"{blog_base}/?mode=rss"
         req = urllib.request.Request(rss_url, headers={"User-Agent": JUGEM_UA})
         with opener.open(req, timeout=10) as res:
             raw = res.read()
-        # XML はバイト列のまま ET に渡す（エンコーディング宣言を正しく処理するため）
         root = ET.fromstring(raw)
-        for item in root.findall(".//item"):
+        items = root.findall(".//item")
+        print(f"  （RSS: {len(items)} 件取得）")
+        for item in items:
             pub_date_str = (item.findtext("pubDate") or "").strip()
             if not pub_date_str:
                 continue
-            try:
-                # RSS pubDate 形式: "Thu, 17 Apr 2026 23:00:00 +0900"
-                dt = datetime.strptime(pub_date_str, "%a, %d %b %Y %H:%M:%S %z")
-                if dt.astimezone(JST).date() == target_date:
-                    print(f"  ✅ {target_date} の投稿が既に存在します。スキップします。")
-                    return True
-            except ValueError:
-                if DEBUG:
-                    print(f"  [DEBUG] RSS 日付パース失敗: {pub_date_str!r}")
-        return False
+            dt = None
+            for fmt in [
+                "%a, %d %b %Y %H:%M:%S %z",   # RFC 822: "Thu, 17 Apr 2026 23:00:00 +0900"
+                "%Y-%m-%dT%H:%M:%S%z",         # ISO 8601
+                "%Y-%m-%d %H:%M:%S",           # "2026-04-17 23:00:00"
+                "%Y-%m-%d",                    # "2026-04-17"
+            ]:
+                try:
+                    dt = datetime.strptime(pub_date_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            if dt is None:
+                print(f"  [WARN] RSS 日付パース失敗（未知のフォーマット）: {pub_date_str!r}")
+                continue
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=JST)
+            post_date = dt.astimezone(JST).date()
+            if DEBUG:
+                print(f"  [DEBUG] RSS 記事日付: {post_date}")
+            if post_date == target_date:
+                print(f"  ✅ {target_date} の投稿が既に存在します（RSS）。スキップします。")
+                return True
     except Exception as e:
-        print(f"  [WARN] 既投稿チェック失敗（スキップして続行）: {e}")
-        return False
+        print(f"  [WARN] RSS チェック失敗: {e}")
+
+    # ── 方法2: 管理画面記事一覧で確認（RSS が使えない場合の保険）──
+    try:
+        req = urllib.request.Request(
+            f"{manage_base}?mode=entry",
+            headers={"User-Agent": JUGEM_UA}
+        )
+        with opener.open(req, timeout=20) as res:
+            list_html = _decode_jugem_response(res.read(), res.headers.get("Content-Type", ""))
+        # JUGEM の管理画面で使われる可能性のある日付フォーマットを全て試す
+        date_patterns = [
+            target_date.strftime("%Y.%m.%d"),      # 2026.04.17
+            target_date.strftime("%Y/%m/%d"),      # 2026/04/17
+            target_date.strftime("%Y-%m-%d"),      # 2026-04-17
+            target_date.strftime("%Y年%m月%d日"),   # 2026年04月17日（ゼロ埋め）
+            target_date.strftime("%Y年%-m月%-d日"), # 2026年4月17日（ゼロなし）
+            target_date.strftime("%-m月%-d日"),    # 4月17日
+        ]
+        for pattern in date_patterns:
+            if pattern in list_html:
+                print(f"  ✅ {target_date} の投稿が既に存在します（管理画面）。スキップします。")
+                return True
+        if DEBUG:
+            print(f"  [DEBUG] 管理画面チェック: 対象パターン未検出 ({', '.join(date_patterns)})")
+    except Exception as e:
+        print(f"  [WARN] 管理画面チェック失敗: {e}")
+
+    print(f"  （{target_date} の投稿なし。投稿を続行します。）")
+    return False
 
 
 def post_to_jugem(title: str, body: str) -> str:
