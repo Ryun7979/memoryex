@@ -8,7 +8,13 @@
       "Bash(git config:*)",
       "Bash(git credential-manager:*)",
       "Bash(echo \"exit: $?\")",
-      "Bash(git credential-manager-core:*)"
+      "Bash(git credential-manager-core:*)",
+      "Bash(node create_presentation.js)",
+      "Bash(npm install *)",
+      "Bash(python scripts/office/unpack.py \"C:\\\\Users\\\\r.nadatani\\\\myGit\\\\memoryex\\\\presentation.pptx\" unpacked/)",
+      "Bash(node -e \"const PptxGenJS = require\\('pptxgenjs'\\); console.log\\('OK'\\)\")",
+      "Bash(node -e ' *)",
+      "Bash(ls \"C:\\\\Users\\\\r.nadatani\\\\myGit\\\\memoryex\\\\presentation.pptx\" 2>/dev/null && echo \"存在確認OK\" || echo \"ファイルなし\")"
     ]
   }
 }
