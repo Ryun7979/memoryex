@@ -46,5 +46,6 @@ jobs:
           GCAL_CLIENT_ID:   ${{ secrets.GCAL_CLIENT_ID }}
           GCAL_CLIENT_SECRET: ${{ secrets.GCAL_CLIENT_SECRET }}
           GCAL_REFRESH_TOKEN: ${{ secrets.GCAL_REFRESH_TOKEN }}
-          TMDB_API_KEY:       ${{ secrets.TMDB_API_KEY }}
+          TMDB_API_KEY:         ${{ secrets.TMDB_API_KEY }}
+          GHEALTH_REFRESH_TOKEN: ${{ secrets.GHEALTH_REFRESH_TOKEN }}
         run: python post.py

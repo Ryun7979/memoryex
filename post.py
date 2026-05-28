@@ -28,10 +28,14 @@ DEBUG            = os.environ.get("DEBUG_MODE", "").lower() in ("1", "true", "ye
 WEATHER_LOCATION   = os.environ.get("WEATHER_LOCATION", "")
 GITHUB_USERNAME    = os.environ.get("GITHUB_USERNAME", "")
 GH_API_TOKEN       = os.environ.get("GH_API_TOKEN", "")
-GCAL_CLIENT_ID     = os.environ.get("GCAL_CLIENT_ID", "")
-GCAL_CLIENT_SECRET = os.environ.get("GCAL_CLIENT_SECRET", "")
-GCAL_REFRESH_TOKEN = os.environ.get("GCAL_REFRESH_TOKEN", "")
-TMDB_API_KEY       = os.environ.get("TMDB_API_KEY", "")
+GCAL_CLIENT_ID        = os.environ.get("GCAL_CLIENT_ID", "")
+GCAL_CLIENT_SECRET    = os.environ.get("GCAL_CLIENT_SECRET", "")
+GCAL_REFRESH_TOKEN    = os.environ.get("GCAL_REFRESH_TOKEN", "")
+TMDB_API_KEY          = os.environ.get("TMDB_API_KEY", "")
+# Google Fit（Fitbit Air）健康データ用 — クライアントID/SECRETはGCALと同じでも可
+GHEALTH_CLIENT_ID     = os.environ.get("GHEALTH_CLIENT_ID", GCAL_CLIENT_ID)
+GHEALTH_CLIENT_SECRET = os.environ.get("GHEALTH_CLIENT_SECRET", GCAL_CLIENT_SECRET)
+GHEALTH_REFRESH_TOKEN = os.environ.get("GHEALTH_REFRESH_TOKEN", "")
 # ────────────────────────────────────────────────────────
 
 
@@ -322,6 +326,98 @@ def get_news_headlines(count: int = 5) -> list[dict]:
         return []
 
 
+def get_health_data(client_id: str, client_secret: str, refresh_token: str, target_date=None) -> dict:
+    """Google Health API v4 から健康データ（歩数・睡眠時間）を取得する。
+    Fitbit Air のデータは Google Health アプリ経由で同期される。
+    """
+    if not all([client_id, client_secret, refresh_token]):
+        return {}
+
+    # アクセストークンを取得
+    token_payload = json.dumps({
+        "client_id":     client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type":    "refresh_token",
+    }).encode()
+    try:
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=token_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            access_token = json.loads(res.read())["access_token"]
+    except Exception as e:
+        print(f"  [WARN] Google Health アクセストークン取得失敗: {e}")
+        return {}
+
+    if target_date is None:
+        target_date = datetime.now(JST).date()
+
+    day_start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=JST)
+    day_end   = day_start + timedelta(days=1)
+    auth_header = {"Authorization": f"Bearer {access_token}"}
+    result: dict = {}
+
+    # ── 歩数（dailyRollUp）──
+    steps_payload = json.dumps({
+        "startTime": day_start.isoformat(),
+        "endTime":   day_end.isoformat(),
+    }).encode()
+    try:
+        req = urllib.request.Request(
+            "https://health.googleapis.com/v4/users/me/dataTypes/steps/dataPoints:dailyRollUp",
+            data=steps_payload,
+            headers={**auth_header, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            data = json.loads(res.read())
+        steps = 0
+        for pt in data.get("rollupDataPoints", []):
+            steps += pt.get("steps", {}).get("countSum", 0)
+        if steps > 0:
+            result["steps"] = int(steps)
+            if DEBUG:
+                print(f"  [DEBUG] Google Health 歩数: {steps:,} 歩")
+    except Exception as e:
+        print(f"  [WARN] Google Health 歩数取得失敗: {e}")
+
+    # ── 睡眠（前日18:00〜当日12:00 JST で就寝をカバー）──
+    sleep_start = day_start - timedelta(hours=6)   # 前日 18:00 JST
+    sleep_end   = day_start + timedelta(hours=12)  # 当日 12:00 JST
+    sleep_params = urllib.parse.urlencode({
+        "startTime": sleep_start.isoformat(),
+        "endTime":   sleep_end.isoformat(),
+    })
+    try:
+        req = urllib.request.Request(
+            f"https://health.googleapis.com/v4/users/me/dataTypes/sleep/dataPoints?{sleep_params}",
+            headers=auth_header,
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            data = json.loads(res.read())
+        sleep_sec = 0
+        for pt in data.get("dataPoints", []):
+            for stage in pt.get("sleep", {}).get("stages", []):
+                # AWAKE 以外（LIGHT / DEEP / REM）を睡眠時間としてカウント
+                if stage.get("type", "AWAKE") != "AWAKE":
+                    s = datetime.fromisoformat(stage["startTime"])
+                    e = datetime.fromisoformat(stage["endTime"])
+                    sleep_sec += max(0, (e - s).total_seconds())
+        if sleep_sec > 0:
+            result["sleep_minutes"] = int(sleep_sec / 60)
+            if DEBUG:
+                h, m = divmod(result["sleep_minutes"], 60)
+                print(f"  [DEBUG] Google Health 睡眠: {h}時間{m}分")
+    except Exception as e:
+        print(f"  [WARN] Google Health 睡眠データ取得失敗: {e}")
+
+    return result
+
+
 def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
     """Telegram から今日（JST）送ったメッセージとURL情報を取得する。"""
     url = (
@@ -416,6 +512,7 @@ def format_with_gemini(
     location_names: list[str] = [],
     movie_infos: list[dict] = [],
     news_headlines: list[dict] = [],
+    health_data: dict = {},
     target_date=None,
 ) -> dict:
     """Gemini API でメモをブログ記事に整形する。"""
@@ -455,6 +552,35 @@ def format_with_gemini(
                 line += f" — {m['overview']}"
             lines.append(line)
         extra_sections += "\n【鑑賞した映画】\n" + "\n".join(lines) + "\n"
+    if health_data:
+        lines = []
+        steps = health_data.get("steps")
+        sleep_min = health_data.get("sleep_minutes")
+        if steps is not None:
+            if steps >= 8000:
+                steps_comment = "よく動いた一日"
+            elif steps >= 5000:
+                steps_comment = "まずまずの活動量"
+            elif steps > 0:
+                steps_comment = "あまり動けなかった一日"
+            else:
+                steps_comment = ""
+            line = f"・歩数: {steps:,}歩"
+            if steps_comment:
+                line += f"（{steps_comment}）"
+            lines.append(line)
+        if sleep_min is not None:
+            h, m = divmod(sleep_min, 60)
+            sleep_str = f"{h}時間{m}分" if m else f"{h}時間"
+            if sleep_min >= 420:
+                sleep_comment = "しっかり眠れた"
+            elif sleep_min >= 360:
+                sleep_comment = "まあまあの睡眠"
+            else:
+                sleep_comment = "少し睡眠が短め"
+            lines.append(f"・睡眠時間: {sleep_str}（{sleep_comment}）")
+        if lines:
+            extra_sections += "\n【健康データ（Fitbit）】\n" + "\n".join(lines) + "\n"
     if news_headlines:
         lines = []
         for n in news_headlines:
@@ -521,6 +647,7 @@ def format_with_gemini(
 
 【要件】
 {requirements}
+- 【健康データ（Fitbit）】がある場合は、歩数・睡眠時間をもとに一言感想を本文中に自然に添える（例：「今日はよく歩いた」「あまり動けなかったので明日は意識したい」「しっかり眠れた」など）。大げさにせず、さらっと触れる程度でよい
 - ポジティブな出来事は少しだけ前向きに表現してよいが、大げさにしない
 - タイトルは 20 字以内で簡潔に
 - 本文の末尾に「本日のよかったこと」セクションを必ず追加する
@@ -964,11 +1091,33 @@ def main():
                 news_headlines = get_news_headlines(5)
                 print(f"   ニュース: {len(news_headlines)} 件取得")
 
+            # 健康データ（Google Fit / Fitbit Air）
+            health_data: dict = {}
+            if GHEALTH_REFRESH_TOKEN:
+                print("💪 Google Fit から健康データを取得中...")
+                health_data = get_health_data(
+                    GHEALTH_CLIENT_ID, GHEALTH_CLIENT_SECRET,
+                    GHEALTH_REFRESH_TOKEN, target_date,
+                )
+                if health_data:
+                    steps = health_data.get("steps")
+                    sleep_min = health_data.get("sleep_minutes")
+                    parts = []
+                    if steps is not None:
+                        parts.append(f"歩数 {steps:,}歩")
+                    if sleep_min is not None:
+                        h, m = divmod(sleep_min, 60)
+                        parts.append(f"睡眠 {h}時間{m}分" if m else f"睡眠 {h}時間")
+                    print(f"   健康データ: {', '.join(parts)}")
+                else:
+                    print("   健康データ: 取得できませんでした（データなしまたはエラー）")
+
             # 3. Gemini で記事生成
             print("\n🤖 Gemini で記事を生成中...")
             article = format_with_gemini(
                 messages, weather, github_activity, gcal_events,
                 url_summaries, location_names, movie_infos, news_headlines,
+                health_data=health_data,
                 target_date=target_date,
             )
             title = article["title"]
