@@ -362,9 +362,19 @@ def get_health_data(client_id: str, client_secret: str, refresh_token: str, targ
     result: dict = {}
 
     # ── 歩数（dailyRollUp）──
+    # リクエストボディは range オブジェクト + windowSizeDays 形式
     steps_payload = json.dumps({
-        "startTime": day_start.isoformat(),
-        "endTime":   day_end.isoformat(),
+        "range": {
+            "start": {
+                "date": {"year": target_date.year, "month": target_date.month, "day": target_date.day},
+                "time": {"hours": 0, "minutes": 0, "seconds": 0, "nanos": 0},
+            },
+            "end": {
+                "date": {"year": target_date.year, "month": target_date.month, "day": target_date.day},
+                "time": {"hours": 23, "minutes": 59, "seconds": 59, "nanos": 0},
+            },
+        },
+        "windowSizeDays": 1,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -385,13 +395,14 @@ def get_health_data(client_id: str, client_secret: str, refresh_token: str, targ
     except Exception as e:
         print(f"  [WARN] Google Health 歩数取得失敗: {e}")
 
-    # ── 睡眠（前日18:00〜当日12:00 JST で就寝をカバー）──
-    sleep_start = day_start - timedelta(hours=6)   # 前日 18:00 JST
-    sleep_end   = day_start + timedelta(hours=12)  # 当日 12:00 JST
-    sleep_params = urllib.parse.urlencode({
-        "startTime": sleep_start.isoformat(),
-        "endTime":   sleep_end.isoformat(),
-    })
+    # ── 睡眠（当日に終了したセッションを取得）──
+    # civil_end_time で当日中に終わった睡眠セッションをフィルタ
+    next_date = target_date + timedelta(days=1)
+    sleep_filter = (
+        f'sleep.interval.civil_end_time >= "{target_date.isoformat()}"'
+        f' AND sleep.interval.civil_end_time < "{next_date.isoformat()}"'
+    )
+    sleep_params = urllib.parse.urlencode({"filter": sleep_filter})
     try:
         req = urllib.request.Request(
             f"https://health.googleapis.com/v4/users/me/dataTypes/sleep/dataPoints?{sleep_params}",
