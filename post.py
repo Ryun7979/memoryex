@@ -12,6 +12,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import xml.etree.ElementTree as ET
+import email.utils
 from datetime import datetime, timezone, timedelta
 
 # ── 設定 ────────────────────────────────────────────────
@@ -22,6 +23,7 @@ JUGEM_USER       = os.environ["JUGEM_USER"]
 JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
+BLOG_BASE_URL    = "https://nadaryu.jugem.cc"
 GEMINI_MODELS    = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 DEBUG            = os.environ.get("DEBUG_MODE", "").lower() in ("1", "true", "yes")
 
@@ -337,6 +339,74 @@ def _format_http_error(e: Exception) -> str:
     return str(e)
 
 
+def _civil_datetime(d, hours=0, minutes=0, seconds=0) -> dict:
+    """Google Health API の CivilDateTime 形式を生成する。"""
+    return {
+        "date": {"year": d.year, "month": d.month, "day": d.day},
+        "time": {"hours": hours, "minutes": minutes, "seconds": seconds, "nanos": 0},
+    }
+
+
+def _first_number(obj):
+    """ネストした値オブジェクトから最初の数値を取り出す（型・キー名の揺れに対応）。"""
+    if isinstance(obj, bool):
+        return None
+    if isinstance(obj, (int, float)):
+        return float(obj)
+    if isinstance(obj, str):
+        try:
+            return float(obj)
+        except ValueError:
+            return None
+    if isinstance(obj, dict):
+        for v in obj.values():
+            n = _first_number(v)
+            if n is not None:
+                return n
+    return None
+
+
+def _health_rollup(access_token: str, data_type: str, start_date, end_date) -> list[dict]:
+    """dailyRollUp で日別集計を取得し、rollup ポイントのリストを返す。"""
+    payload = json.dumps({
+        "range": {
+            "start": _civil_datetime(start_date),
+            "end":   _civil_datetime(end_date, 23, 59, 59),
+        },
+        "windowSizeDays": 1,
+    }).encode()
+    req = urllib.request.Request(
+        f"https://health.googleapis.com/v4/users/me/dataTypes/{data_type}/dataPoints:dailyRollUp",
+        data=payload,
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as res:
+        data = json.loads(res.read())
+    if DEBUG:
+        print(f"  [DEBUG] {data_type} レスポンス: {json.dumps(data, ensure_ascii=False)[:300]}")
+    return data.get("rollupDataPoints") or data.get("dataPoints") or []
+
+
+def _rollup_point_date(pt: dict) -> str:
+    """rollup ポイントの日付を YYYY-MM-DD 形式で返す。"""
+    d = pt.get("civilStartTime", {}).get("date", {})
+    if d:
+        return f"{d.get('year', 0):04d}-{d.get('month', 0):02d}-{d.get('day', 0):02d}"
+    return ""
+
+
+def _rollup_point_value(pt: dict):
+    """rollup ポイントからデータ値（数値）を取り出す。"""
+    for k, v in pt.items():
+        if k in ("civilStartTime", "civilEndTime"):
+            continue
+        n = _first_number(v)
+        if n is not None:
+            return n
+    return None
+
+
 def get_health_data(client_id: str, client_secret: str, refresh_token: str, target_date=None) -> dict:
     """Google Health API v4 から健康データ（歩数・睡眠時間）を取得する。
     Fitbit Air のデータは Google Health アプリ経由で同期される。
@@ -367,52 +437,88 @@ def get_health_data(client_id: str, client_secret: str, refresh_token: str, targ
     if target_date is None:
         target_date = datetime.now(JST).date()
 
-    day_start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=JST)
-    day_end   = day_start + timedelta(days=1)
     auth_header = {"Authorization": f"Bearer {access_token}"}
     result: dict = {}
 
-    # ── 歩数（dailyRollUp）──
-    # リクエストボディは range オブジェクト + windowSizeDays 形式
-    steps_payload = json.dumps({
-        "range": {
-            "start": {
-                "date": {"year": target_date.year, "month": target_date.month, "day": target_date.day},
-                "time": {"hours": 0, "minutes": 0, "seconds": 0, "nanos": 0},
-            },
-            "end": {
-                "date": {"year": target_date.year, "month": target_date.month, "day": target_date.day},
-                "time": {"hours": 23, "minutes": 59, "seconds": 59, "nanos": 0},
-            },
-        },
-        "windowSizeDays": 1,
-    }).encode()
+    # ── 歩数（過去7日分をまとめて取得し、当日値と週平均を算出）──
+    try:
+        points = _health_rollup(access_token, "steps", target_date - timedelta(days=7), target_date)
+        today_key = target_date.isoformat()
+        prev_values: list[float] = []
+        for pt in points:
+            val = _rollup_point_value(pt)
+            if val is None or val <= 0:
+                continue
+            if _rollup_point_date(pt) == today_key:
+                result["steps"] = int(val)
+            else:
+                prev_values.append(val)
+        if prev_values:
+            result["steps_week_avg"] = int(sum(prev_values) / len(prev_values))
+        if DEBUG and "steps" in result:
+            avg_note = f"（直近7日平均 {result['steps_week_avg']:,} 歩）" if "steps_week_avg" in result else ""
+            print(f"  [DEBUG] Google Health 歩数: {result['steps']:,} 歩{avg_note}")
+    except Exception as e:
+        print(f"  [WARN] Google Health 歩数取得失敗: {_format_http_error(e)}")
+
+    # ── 移動距離・消費カロリー・アクティブ時間（当日分）──
+    rollup_targets = (
+        ("distance",       "distance_km"),
+        ("total-calories", "calories"),
+        ("active-minutes", "active_minutes"),
+    )
+    for data_type, key in rollup_targets:
+        try:
+            points = _health_rollup(access_token, data_type, target_date, target_date)
+            total = 0.0
+            for pt in points:
+                v = _rollup_point_value(pt)
+                if v is not None:
+                    total += v
+            if total <= 0:
+                continue
+            if key == "distance_km":
+                # 単位の揺れ対策: 20万超ならミリメートル、それ以外はメートルとみなす
+                result[key] = round(total / 1_000_000, 1) if total > 200_000 else round(total / 1_000, 1)
+            else:
+                result[key] = int(total)
+        except Exception as e:
+            print(f"  [WARN] Google Health {data_type} 取得失敗: {_format_http_error(e)}")
+
+    # ── 運動セッション（Fitbit が自動検出したウォーキング等）──
+    ex_next = target_date + timedelta(days=1)
+    ex_filter = (
+        f'exercise.interval.civil_end_time >= "{target_date.isoformat()}"'
+        f' AND exercise.interval.civil_end_time < "{ex_next.isoformat()}"'
+    )
     try:
         req = urllib.request.Request(
-            "https://health.googleapis.com/v4/users/me/dataTypes/steps/dataPoints:dailyRollUp",
-            data=steps_payload,
-            headers={**auth_header, "Content-Type": "application/json"},
-            method="POST",
+            "https://health.googleapis.com/v4/users/me/dataTypes/exercise/dataPoints?"
+            + urllib.parse.urlencode({"filter": ex_filter}),
+            headers=auth_header,
         )
         with urllib.request.urlopen(req, timeout=10) as res:
             data = json.loads(res.read())
         if DEBUG:
-            print(f"  [DEBUG] 歩数レスポンス: {json.dumps(data, ensure_ascii=False)[:500]}")
-        steps = 0
-        # フィールド名の揺れに備えて複数キーを確認する
-        points = data.get("rollupDataPoints") or data.get("dataPoints") or []
-        for pt in points:
-            val = pt.get("steps", {}).get("countSum", 0)
+            print(f"  [DEBUG] 運動レスポンス: {json.dumps(data, ensure_ascii=False)[:300]}")
+        exercises: list[str] = []
+        for pt in data.get("dataPoints", []):
+            ex = pt.get("exercise", {})
+            ex_type = str(ex.get("exerciseType") or ex.get("activityType") or "運動")
+            ex_type = ex_type.replace("_", " ").title()
+            mins = None
             try:
-                steps += int(val)
-            except (TypeError, ValueError):
+                interval = ex.get("interval", {})
+                s = datetime.fromisoformat(interval["startTime"].replace("Z", "+00:00"))
+                e2 = datetime.fromisoformat(interval["endTime"].replace("Z", "+00:00"))
+                mins = int((e2 - s).total_seconds() / 60)
+            except Exception:
                 pass
-        if steps > 0:
-            result["steps"] = steps
-            if DEBUG:
-                print(f"  [DEBUG] Google Health 歩数: {steps:,} 歩")
+            exercises.append(f"{ex_type}（{mins}分）" if mins else ex_type)
+        if exercises:
+            result["exercises"] = exercises
     except Exception as e:
-        print(f"  [WARN] Google Health 歩数取得失敗: {_format_http_error(e)}")
+        print(f"  [WARN] Google Health 運動セッション取得失敗: {_format_http_error(e)}")
 
     # ── 睡眠（当日に終了したセッションを取得）──
     # civil_end_time で当日中に終わった睡眠セッションをフィルタ
@@ -448,6 +554,40 @@ def get_health_data(client_id: str, client_secret: str, refresh_token: str, targ
         print(f"  [WARN] Google Health 睡眠データ取得失敗: {_format_http_error(e)}")
 
     return result
+
+
+def get_week_posts(start_date, end_date) -> list[dict]:
+    """JUGEM の RSS から指定期間の記事一覧を取得する（週間ダイジェスト用）。"""
+    url = f"{BLOG_BASE_URL}/?mode=rss"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "memoryex/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as res:
+            raw = res.read()
+        root = ET.fromstring(raw)
+        posts: list[dict] = []
+        # RSS 1.0 (RDF) / 2.0 どちらでも拾えるよう名前空間はワイルドカードで探す
+        for item in root.findall(".//{*}item"):
+            title = (item.findtext("{*}title") or "").strip()
+            desc = re.sub(r"<[^>]+>", " ", item.findtext("{*}description") or "")
+            desc = re.sub(r"\s+", " ", desc).strip()[:200]
+            pub = (item.findtext("{*}date") or item.findtext("{*}pubDate") or "").strip()
+            d = None
+            if pub:
+                try:
+                    d = datetime.fromisoformat(pub).astimezone(JST).date()
+                except ValueError:
+                    try:
+                        d = email.utils.parsedate_to_datetime(pub).astimezone(JST).date()
+                    except Exception:
+                        pass
+            if d is None or not (start_date <= d <= end_date):
+                continue
+            posts.append({"date": d.isoformat(), "title": title, "summary": desc})
+        posts.sort(key=lambda p: p["date"])
+        return posts
+    except Exception as e:
+        print(f"  [WARN] 週間記事の取得失敗: {e}")
+        return []
 
 
 def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
@@ -568,6 +708,7 @@ def format_with_gemini(
     movie_infos: list[dict] = [],
     news_headlines: list[dict] = [],
     health_data: dict = {},
+    week_posts: list[dict] = [],
     target_date=None,
 ) -> dict:
     """Gemini API でメモをブログ記事に整形する。"""
@@ -610,6 +751,7 @@ def format_with_gemini(
     if health_data:
         lines = []
         steps = health_data.get("steps")
+        week_avg = health_data.get("steps_week_avg")
         sleep_min = health_data.get("sleep_minutes")
         if steps is not None:
             if steps >= 8000:
@@ -623,6 +765,14 @@ def format_with_gemini(
             line = f"・歩数: {steps:,}歩"
             if steps_comment:
                 line += f"（{steps_comment}）"
+            # 直近7日平均との比較コメント（±15% を同程度とみなす）
+            if week_avg:
+                if steps >= week_avg * 1.15:
+                    line += f"。直近7日平均（{week_avg:,}歩）より多め"
+                elif steps <= week_avg * 0.85:
+                    line += f"。直近7日平均（{week_avg:,}歩）より少なめ"
+                else:
+                    line += f"。直近7日平均（{week_avg:,}歩）と同程度"
             lines.append(line)
         if sleep_min is not None:
             h, m = divmod(sleep_min, 60)
@@ -634,8 +784,19 @@ def format_with_gemini(
             else:
                 sleep_comment = "少し睡眠が短め"
             lines.append(f"・睡眠時間: {sleep_str}（{sleep_comment}）")
+        if health_data.get("distance_km"):
+            lines.append(f"・移動距離: {health_data['distance_km']}km")
+        if health_data.get("calories"):
+            lines.append(f"・消費カロリー: 約{health_data['calories']:,}kcal")
+        if health_data.get("active_minutes"):
+            lines.append(f"・アクティブ時間: {health_data['active_minutes']}分")
+        if health_data.get("exercises"):
+            lines.append("・検出された運動: " + "、".join(health_data["exercises"]))
         if lines:
             extra_sections += "\n【健康データ（Fitbit）】\n" + "\n".join(lines) + "\n"
+    if week_posts:
+        lines = [f"・{p['date']} 「{p['title']}」: {p['summary']}" for p in week_posts]
+        extra_sections += "\n【今週の記事一覧】\n" + "\n".join(lines) + "\n"
     if news_headlines:
         lines = []
         for n in news_headlines:
@@ -670,6 +831,13 @@ def format_with_gemini(
   - ニュースは事実のみ掲載し、個人的な意見や感想は加えない
 - カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える"""
 
+    weekly_req = ""
+    if week_posts:
+        weekly_req = """
+- 今日は日曜のため、本文の末尾（「本日のよかったこと」の直前）に <h3>今週のダイジェスト</h3> セクションを設ける
+  - 【今週の記事一覧】をもとに、1週間の出来事の流れが分かる文章を3〜5文でまとめる
+  - 記事タイトルの羅列にせず、印象的な出来事を拾って自然な振り返りの文章にする"""
+
     prompt = f"""\
 以下は{today_str}の情報です。これをブログ記事としてまとめてください。
 
@@ -702,7 +870,7 @@ def format_with_gemini(
 - メモの内容と補足情報は、話題ごとに独立した段落として別々に記述する
 
 【要件】
-{requirements}
+{requirements}{weekly_req}
 - 【健康データ（Fitbit）】がある場合は、メモの有無にかかわらず、歩数・睡眠時間に必ず本文中で触れ、一言感想を添える（例：「今日はよく歩いた」「あまり動けなかったので明日は意識したい」「しっかり眠れた」など）。大げさにせず、さらっと触れる程度でよい
 - ポジティブな出来事は少しだけ前向きに表現してよいが、大げさにしない
 - タイトルは 20 字以内で簡潔に
@@ -1084,7 +1252,7 @@ def main():
         title = "テスト投稿"
         body  = "<p>これは接続確認用のテスト投稿です。自動投稿スクリプトから送信されました。</p>"
         post_id = post_to_jugem(title, body)
-        blog_url = f"https://nadaryu.jugem.cc/?eid={post_id}"
+        blog_url = f"{BLOG_BASE_URL}/?eid={post_id}"
         print(f"✅  投稿完了！ post_id = {post_id}")
         print(f"   URL: {blog_url}")
         notify_telegram(title, body, blog_url)
@@ -1168,12 +1336,20 @@ def main():
                 else:
                     print("   健康データ: 取得できませんでした（データなしまたはエラー）")
 
+            # 日曜は週間ダイジェスト用に今週の記事一覧を収集
+            week_posts: list[dict] = []
+            if target_date.weekday() == 6:
+                print("📚 日曜のため週間ダイジェスト用の記事を収集中...")
+                week_posts = get_week_posts(target_date - timedelta(days=6), target_date)
+                print(f"   今週の記事: {len(week_posts)} 件")
+
             # 3. Gemini で記事生成
             print("\n🤖 Gemini で記事を生成中...")
             article = format_with_gemini(
                 messages, weather, github_activity, gcal_events,
                 url_summaries, location_names, movie_infos, news_headlines,
                 health_data=health_data,
+                week_posts=week_posts,
                 target_date=target_date,
             )
             title = article["title"]
@@ -1183,7 +1359,7 @@ def main():
             # 4. JUGEM に投稿
             print("\n📝 JUGEM に投稿中...")
             post_id = post_to_jugem(title, body)
-            blog_url = f"https://nadaryu.jugem.cc/?eid={post_id}"
+            blog_url = f"{BLOG_BASE_URL}/?eid={post_id}"
             print(f"✅  投稿完了！ post_id = {post_id}")
             print(f"   URL: {blog_url}")
 
