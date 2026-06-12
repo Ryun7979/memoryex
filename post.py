@@ -326,6 +326,17 @@ def get_news_headlines(count: int = 5) -> list[dict]:
         return []
 
 
+def _format_http_error(e: Exception) -> str:
+    """HTTPError の場合はレスポンスボディ（APIのエラー詳細）も含めて文字列化する。"""
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+            return f"{e.code} {e.reason}: {body}"
+        except Exception:
+            return f"{e.code} {e.reason}"
+    return str(e)
+
+
 def get_health_data(client_id: str, client_secret: str, refresh_token: str, target_date=None) -> dict:
     """Google Health API v4 から健康データ（歩数・睡眠時間）を取得する。
     Fitbit Air のデータは Google Health アプリ経由で同期される。
@@ -350,7 +361,7 @@ def get_health_data(client_id: str, client_secret: str, refresh_token: str, targ
         with urllib.request.urlopen(req, timeout=10) as res:
             access_token = json.loads(res.read())["access_token"]
     except Exception as e:
-        print(f"  [WARN] Google Health アクセストークン取得失敗: {e}")
+        print(f"  [WARN] Google Health アクセストークン取得失敗: {_format_http_error(e)}")
         return {}
 
     if target_date is None:
@@ -385,15 +396,23 @@ def get_health_data(client_id: str, client_secret: str, refresh_token: str, targ
         )
         with urllib.request.urlopen(req, timeout=10) as res:
             data = json.loads(res.read())
+        if DEBUG:
+            print(f"  [DEBUG] 歩数レスポンス: {json.dumps(data, ensure_ascii=False)[:500]}")
         steps = 0
-        for pt in data.get("rollupDataPoints", []):
-            steps += pt.get("steps", {}).get("countSum", 0)
+        # フィールド名の揺れに備えて複数キーを確認する
+        points = data.get("rollupDataPoints") or data.get("dataPoints") or []
+        for pt in points:
+            val = pt.get("steps", {}).get("countSum", 0)
+            try:
+                steps += int(val)
+            except (TypeError, ValueError):
+                pass
         if steps > 0:
-            result["steps"] = int(steps)
+            result["steps"] = steps
             if DEBUG:
                 print(f"  [DEBUG] Google Health 歩数: {steps:,} 歩")
     except Exception as e:
-        print(f"  [WARN] Google Health 歩数取得失敗: {e}")
+        print(f"  [WARN] Google Health 歩数取得失敗: {_format_http_error(e)}")
 
     # ── 睡眠（当日に終了したセッションを取得）──
     # civil_end_time で当日中に終わった睡眠セッションをフィルタ
@@ -410,6 +429,8 @@ def get_health_data(client_id: str, client_secret: str, refresh_token: str, targ
         )
         with urllib.request.urlopen(req, timeout=10) as res:
             data = json.loads(res.read())
+        if DEBUG:
+            print(f"  [DEBUG] 睡眠レスポンス: {json.dumps(data, ensure_ascii=False)[:500]}")
         sleep_sec = 0
         for pt in data.get("dataPoints", []):
             for stage in pt.get("sleep", {}).get("stages", []):
@@ -424,16 +445,18 @@ def get_health_data(client_id: str, client_secret: str, refresh_token: str, targ
                 h, m = divmod(result["sleep_minutes"], 60)
                 print(f"  [DEBUG] Google Health 睡眠: {h}時間{m}分")
     except Exception as e:
-        print(f"  [WARN] Google Health 睡眠データ取得失敗: {e}")
+        print(f"  [WARN] Google Health 睡眠データ取得失敗: {_format_http_error(e)}")
 
     return result
 
 
 def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
     """Telegram から今日（JST）送ったメッセージとURL情報を取得する。"""
+    # offset=-100: キューの「新しい方から」最大100件を取得する。
+    # （デフォルトは古い順100件のため、更新が多い日に当日分が切り捨てられる）
     url = (
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-        "/getUpdates?limit=100&allowed_updates=[\"message\"]"
+        "/getUpdates?limit=100&offset=-100&allowed_updates=[\"message\"]"
     )
     try:
         with urllib.request.urlopen(url, timeout=15) as res:
@@ -458,16 +481,26 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
     found_locations: list[dict] = []
     found_movies: list[str] = []
 
-    for update in data.get("result", []):
+    # 診断カウンタ: メモが取得できない原因をログから特定できるようにする
+    updates = data.get("result", [])
+    diag_dates: dict[str, int] = {}
+    diag_other_chat = 0
+    diag_no_text = 0
+
+    for update in updates:
         msg = update.get("message") or update.get("channel_post", {})
         if not msg:
             continue
         if str(msg.get("chat", {}).get("id", "")) != str(TELEGRAM_CHAT_ID):
+            diag_other_chat += 1
             continue
         ts = datetime.fromtimestamp(msg["date"], tz=JST)
+        date_key = ts.date().isoformat()
+        diag_dates[date_key] = diag_dates.get(date_key, 0) + 1
         if ts.date() != target_date:
             continue
-        text = msg.get("text", "").strip()
+        # 写真などのキャプション付きメッセージもメモとして扱う
+        text = (msg.get("text") or msg.get("caption") or "").strip()
         if text:
             messages.append(text)
             for u in url_pattern.findall(text):
@@ -477,6 +510,8 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
                 t = m.strip()
                 if t and t not in found_movies:
                     found_movies.append(t)
+        else:
+            diag_no_text += 1
         # 位置情報メッセージを収集
         loc = msg.get("location")
         if loc:
@@ -484,6 +519,15 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
                 "lat": loc["latitude"],
                 "lon": loc["longitude"],
             })
+
+    # 診断ログ: 何件届いていて、なぜメモ0件なのかを毎回出力する
+    date_summary = ", ".join(f"{d}: {n}件" for d, n in sorted(diag_dates.items())) or "なし"
+    print(f"  [診断] 取得した更新: {len(updates)} 件 / 対象日: {target_date}")
+    print(f"  [診断] 日付別の内訳: {date_summary}")
+    if diag_other_chat:
+        print(f"  [診断] 対象外チャットの更新: {diag_other_chat} 件")
+    if diag_no_text:
+        print(f"  [診断] テキストなし（スタンプ・位置情報等）: {diag_no_text} 件")
 
     # URL のタイトル・概要を取得（最大5件）
     url_summaries: list[dict] = []
@@ -610,7 +654,7 @@ def format_with_gemini(
 - メモの内容を自然な日記文に仕上げる。過度な装飾・大げさな表現・接続詞の多用は避ける
 - 話題が変わるごとに <p> タグで段落を分け、読みやすくする
 - 大きく話題が変わる箇所のみ <h3> タグでサブタイトルをつける。細かい話題ごとにはつけない
-- 補足情報（カレンダー・GitHub・訪問場所・映画）はメモとは独立した段落として記述する。メモの話題と無理につなげない
+- 補足情報（カレンダー・GitHub・訪問場所・映画・健康データ）はメモとは独立した段落として記述する。メモの話題と無理につなげない
 - 天気は冒頭に一文で添える程度でよい
 - 【共有URL】がある場合は、本文とは別に「本日の気になったインターネット」セクションを設ける
   - 形式: <p><b>本日の気になったインターネット</b></p><ul><li><a href="URL">タイトル</a> — 紹介文</li>...</ul>
@@ -618,8 +662,9 @@ def format_with_gemini(
     else:
         memo_section = ""
         requirements = """\
-- 【メモ】がないため、天気・予定・ニュースを中心にまとめる
+- 【メモ】がないため、天気・予定・健康データ・ニュースを中心にまとめる
 - 天気や予定は短く触れる程度でよい
+- 【健康データ（Fitbit）】がある場合は、歩数や睡眠について本文中で必ず触れる
 - 【本日のニュース】がある場合は「本日のニュースピックアップ」セクションを設ける
   - 形式: <p><b>本日のニュースピックアップ</b></p><ul><li><a href="URL">タイトル</a> — 概要</li>...</ul>
   - ニュースは事実のみ掲載し、個人的な意見や感想は加えない
@@ -658,7 +703,7 @@ def format_with_gemini(
 
 【要件】
 {requirements}
-- 【健康データ（Fitbit）】がある場合は、歩数・睡眠時間をもとに一言感想を本文中に自然に添える（例：「今日はよく歩いた」「あまり動けなかったので明日は意識したい」「しっかり眠れた」など）。大げさにせず、さらっと触れる程度でよい
+- 【健康データ（Fitbit）】がある場合は、メモの有無にかかわらず、歩数・睡眠時間に必ず本文中で触れ、一言感想を添える（例：「今日はよく歩いた」「あまり動けなかったので明日は意識したい」「しっかり眠れた」など）。大げさにせず、さらっと触れる程度でよい
 - ポジティブな出来事は少しだけ前向きに表現してよいが、大げさにしない
 - タイトルは 20 字以内で簡潔に
 - 本文の末尾に「本日のよかったこと」セクションを必ず追加する
