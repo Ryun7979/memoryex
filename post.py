@@ -1309,6 +1309,20 @@ def main():
             if gcal_events:
                 print(f"   カレンダー: {len(gcal_events)} 件")
 
+            # カレンダーの「映画 〇〇」予定は鑑賞した映画として扱う
+            # （予定一覧からは除外し、TMDB 情報付きで【鑑賞した映画】に載せる）
+            movie_event_pattern = re.compile(r"^(?:\d{1,2}:\d{2}|終日)\s+映画[　 :：、,]?\s*(.+)")
+            remaining_events: list[str] = []
+            for ev in gcal_events:
+                m = movie_event_pattern.match(ev)
+                title = m.group(1).strip() if m else ""
+                if title and all(title != mi.get("title") for mi in movie_infos):
+                    movie_infos.append(fetch_movie_info(title))
+                    print(f"   カレンダーから映画を検出: {title}")
+                else:
+                    remaining_events.append(ev)
+            gcal_events = remaining_events
+
             news_headlines: list[dict] = []
             if not messages:
                 print("📰 Yahoo!ニュース取得中...")
