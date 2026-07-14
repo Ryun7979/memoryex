@@ -18,7 +18,9 @@
       "WebSearch",
       "Bash(git fetch *)",
       "Bash(gh run *)",
-      "PowerShell(gh run list --workflow daily_post.yml --limit 10)"
+      "PowerShell(gh run list --workflow daily_post.yml --limit 10)",
+      "PowerShell(py -m py_compile post.py)",
+      "PowerShell(if \\($?\\) { \"OK\" })"
     ]
   }
 }
