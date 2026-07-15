@@ -5,6 +5,7 @@ Telegram の今日のメモを Gemini で整形して JUGEM ブログに投稿�
 
 import os
 import re
+import html
 import json
 import time
 import http.cookiejar
@@ -698,6 +699,126 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
     return messages, url_summaries, location_names, movie_infos, target_date
 
 
+def _strip_code_fences(text: str) -> str:
+    """```json ... ``` コードブロックを除去する。"""
+    text = text.strip()
+    if text.startswith("```"):
+        text = "\n".join(
+            l for l in text.splitlines() if not l.startswith("```")
+        ).strip()
+    return text
+
+
+def _call_gemini(prompt: str, thinking_budget: int = 5000) -> str:
+    """Gemini API を呼び出して生成テキストを返す（モデルフォールバック付き）。"""
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 1.0,          # thinking 有効時は 1.0 が推奨
+            "thinkingConfig": {
+                "thinkingBudget": thinking_budget,  # thinking トークン上限（0=無効、-1=動的）
+            },
+        },
+    }).encode()
+
+    last_error = None
+    data = None
+    for model in GEMINI_MODELS:
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent"
+        )
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": GEMINI_API_KEY,
+            },
+            method="POST"
+        )
+        print(f"  Gemini モデル: {model}")
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as res:
+                    data = json.loads(res.read())
+                break
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode()
+                if e.code == 429:
+                    # 日次クォータ超過: リトライしても解決しないので即フォールバック
+                    print(f"  Gemini 429 クォータ超過。次のモデルへフォールバック...")
+                    last_error = RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
+                    break
+                if e.code == 503 and attempt < 4:
+                    wait = 30 * (attempt + 1)  # 30, 60, 90, 120 秒
+                    print(f"  Gemini 503 一時エラー。{wait}秒待機後リトライ ({attempt+1}/4)...")
+                    time.sleep(wait)
+                    continue
+                last_error = RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
+                break
+        if data is not None:
+            break
+        print(f"  {model} が利用不可。次のモデルへフォールバック...")
+    if data is None:
+        raise last_error
+
+    return _strip_code_fences(data["candidates"][0]["content"]["parts"][0]["text"])
+
+
+def build_data_items(
+    messages: list[str],
+    gcal_events: list[str],
+    github_activity: list[str],
+    url_summaries: list[dict],
+    location_names: list[str],
+    movie_infos: list[dict],
+) -> list[str]:
+    """記事に必ず反映すべきデータ項目の一覧を作る（反映漏れ検査用）。"""
+    items: list[str] = []
+    items += [f"メモ: {m}" for m in messages]
+    items += [f"予定: {e}" for e in gcal_events]
+    items += [f"GitHub: {a}" for a in github_activity]
+    items += [f"共有URL: {s['title'] or s['url']}" for s in url_summaries]
+    items += [f"訪問場所: {n}" for n in location_names]
+    items += [f"映画: {m['title']}" for m in movie_infos]
+    return items
+
+
+def check_article_coverage(items: list[str], body: str) -> list[str]:
+    """記事本文に反映されていないデータ項目を Gemini に判定させて返す。
+    判定に失敗した場合は空リストを返す（投稿自体は止めない）。
+    """
+    if not items:
+        return []
+    plain = re.sub(r"<[^>]+>", " ", body)
+    plain = re.sub(r"\s+", " ", plain).strip()
+    numbered = "\n".join(f"{i}. {it}" for i, it in enumerate(items, 1))
+    prompt = f"""\
+以下の【データ項目】のそれぞれが【記事本文】に反映されているかを判定してください。
+
+判定基準:
+- 言い換え・要約されていても、その項目の内容に触れていれば「反映されている」とみなす
+- 会社名・団体名・人名が「ある会社」「知人」などの曖昧な表現に置き換えられていても「反映されている」とみなす
+- 項目の内容が本文のどこにも一切登場しない場合のみ「未反映」とする
+
+【データ項目】
+{numbered}
+
+【記事本文】
+{plain}
+
+未反映の項目の番号だけを JSON 配列で返してください（例: [2, 5]）。
+全て反映されていれば [] を返してください。JSON 配列のみを返すこと。"""
+    try:
+        raw = _call_gemini(prompt, thinking_budget=2000)
+        nums = json.loads(raw)
+        return [items[n - 1] for n in nums
+                if isinstance(n, int) and 1 <= n <= len(items)]
+    except Exception as e:
+        print(f"  [WARN] 反映漏れチェック失敗（チェックをスキップ）: {e}")
+        return []
+
+
 def format_with_gemini(
     messages: list[str],
     weather: str = "",
@@ -710,6 +831,7 @@ def format_with_gemini(
     health_data: dict = {},
     week_posts: list[dict] = [],
     target_date=None,
+    missing_feedback: list[str] = [],
 ) -> dict:
     """Gemini API でメモをブログ記事に整形する。"""
     if target_date is None:
@@ -833,6 +955,15 @@ def format_with_gemini(
   - ニュースは事実のみ掲載し、個人的な意見や感想は加えない
 - カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える"""
 
+    feedback_section = ""
+    if missing_feedback:
+        fb = "\n".join(f"・{x}" for x in missing_feedback)
+        feedback_section = f"""
+【前回の生成で漏れていた項目】
+前回の生成では以下の項目が記事に反映されていませんでした。今回は必ず全て本文に反映してください。
+{fb}
+"""
+
     weekly_req = ""
     if week_posts:
         weekly_req = """
@@ -871,7 +1002,7 @@ def format_with_gemini(
   - 悪い例：「天気が良かったので外出が楽しめた」（メモに記載がない場合）
 - メモの内容と補足情報は、話題ごとに独立した段落として別々に記述する
 - 【最重要】提供されたデータ（メモの各行・予定の各件・その他セクションの各項目）は全て記事に反映する。出力する前に、各セクションの全項目が本文に含まれているかを一つずつ確認し、漏れがあれば追記してから出力する
-
+{feedback_section}
 【要件】
 {requirements}{weekly_req}
 - 【健康データ（Fitbit）】がある場合は、メモの有無にかかわらず、歩数・睡眠時間に必ず本文中で触れ、一言感想を添える（例：「今日はよく歩いた」「あまり動けなかったので明日は意識したい」「しっかり眠れた」など）。大げさにせず、さらっと触れる程度でよい
@@ -887,65 +1018,7 @@ def format_with_gemini(
 {memo_section}
 {extra_sections}"""
 
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 1.0,          # thinking 有効時は 1.0 が推奨
-            "thinkingConfig": {
-                "thinkingBudget": 5000,  # thinking トークン上限（0=無効、-1=動的）
-            },
-        },
-    }).encode()
-
-    last_error = None
-    data = None
-    for model in GEMINI_MODELS:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model}:generateContent"
-        )
-        req = urllib.request.Request(
-            url, data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": GEMINI_API_KEY,
-            },
-            method="POST"
-        )
-        print(f"  Gemini モデル: {model}")
-        for attempt in range(5):
-            try:
-                with urllib.request.urlopen(req, timeout=30) as res:
-                    data = json.loads(res.read())
-                break
-            except urllib.error.HTTPError as e:
-                err_body = e.read().decode()
-                if e.code == 429:
-                    # 日次クォータ超過: リトライしても解決しないので即フォールバック
-                    print(f"  Gemini 429 クォータ超過。次のモデルへフォールバック...")
-                    last_error = RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
-                    break
-                if e.code == 503 and attempt < 4:
-                    wait = 30 * (attempt + 1)  # 30, 60, 90, 120 秒
-                    print(f"  Gemini 503 一時エラー。{wait}秒待機後リトライ ({attempt+1}/4)...")
-                    time.sleep(wait)
-                    continue
-                last_error = RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
-                break
-        if data is not None:
-            break
-        print(f"  {model} が利用不可。次のモデルへフォールバック...")
-    if data is None:
-        raise last_error
-
-    raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-    # ```json ... ``` ブロックを除去
-    if raw_text.startswith("```"):
-        lines = raw_text.splitlines()
-        raw_text = "\n".join(
-            l for l in lines if not l.startswith("```")
-        ).strip()
+    raw_text = _call_gemini(prompt)
 
     try:
         return json.loads(raw_text)
@@ -1372,6 +1445,35 @@ def main():
             title = article["title"]
             body  = article["body"]
             print(f"✅  タイトル: {title}")
+
+            # 3.5 反映漏れチェック: 拾ったデータが全て記事に含まれているか検査し、
+            #     漏れがあれば再生成（最大2回）。それでも漏れたら記事末尾に追記する。
+            data_items = build_data_items(
+                messages, gcal_events, github_activity,
+                url_summaries, location_names, movie_infos,
+            )
+            missing = check_article_coverage(data_items, body)
+            for retry in range(1, 3):
+                if not missing:
+                    break
+                print(f"⚠️  {len(missing)} 件が記事に未反映。再生成します ({retry}/2)...")
+                for x in missing:
+                    print(f"   - {x[:60]}")
+                article = format_with_gemini(
+                    messages, weather, github_activity, gcal_events,
+                    url_summaries, location_names, movie_infos, news_headlines,
+                    health_data=health_data,
+                    week_posts=week_posts,
+                    target_date=target_date,
+                    missing_feedback=missing,
+                )
+                title = article["title"]
+                body  = article["body"]
+                missing = check_article_coverage(data_items, body)
+            if missing:
+                print(f"⚠️  再生成後も {len(missing)} 件が未反映のため、記事末尾に追記します")
+                lis = "".join(f"<li>{html.escape(x)}</li>" for x in missing)
+                body += f"<p><b>そのほかの記録</b></p><ul>{lis}</ul>"
 
             # 4. JUGEM に投稿
             print("\n📝 JUGEM に投稿中...")

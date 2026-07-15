@@ -20,7 +20,9 @@
       "Bash(gh run *)",
       "PowerShell(gh run list --workflow daily_post.yml --limit 10)",
       "PowerShell(py -m py_compile post.py)",
-      "PowerShell(if \\($?\\) { \"OK\" })"
+      "PowerShell(if \\($?\\) { \"OK\" })",
+      "PowerShell(if \\($?\\) { \"compile OK\" })",
+      "PowerShell(py \"C:\\\\Users\\\\R87CD~1.NAD\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-r-nadatani-myGit-memoryex-memoryex\\\\5c587eb0-5bec-41ff-9faf-1a5258233458\\\\scratchpad\\\\test_coverage.py\")"
     ]
   }
 }
