@@ -74,8 +74,22 @@ def get_github_activity(username: str, token: str = "") -> list[str]:
         with urllib.request.urlopen(req, timeout=10) as res:
             events = json.loads(res.read())
     except Exception as e:
-        print(f"  [WARN] GitHub アクティビティ取得失敗: {e}")
-        return []
+        # Actions の GITHUB_TOKEN はリポジトリ限定のインストールトークンで、
+        # /users/{user}/events のようなユーザー系エンドポイントでは 403 になる。
+        # その場合は認証なし（公開イベントのみ）で再試行する。
+        if token and "Authorization" in headers:
+            print(f"  [WARN] GitHub 認証付き取得失敗。認証なしで再試行: {_format_http_error(e)}")
+            headers.pop("Authorization")
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as res:
+                    events = json.loads(res.read())
+            except Exception as e2:
+                print(f"  [WARN] GitHub アクティビティ取得失敗: {_format_http_error(e2)}")
+                return []
+        else:
+            print(f"  [WARN] GitHub アクティビティ取得失敗: {_format_http_error(e)}")
+            return []
 
     today = datetime.now(JST).date()
     activities: list[str] = []
@@ -151,6 +165,28 @@ def get_gcal_events(client_id: str, client_secret: str, refresh_token: str, targ
         print(f"  [WARN] Google Calendar トークン取得失敗: {e}")
         return []
 
+    # カレンダー一覧を取得し、自分が書き込めるもの（owner/writer）を全て対象にする
+    # （primary だけだと家族用・TeamOn などの別カレンダーの予定が漏れるため）
+    # 祝日や購読フィード（accessRole=reader）は自分の行動記録ではないので除外する
+    try:
+        req = urllib.request.Request(
+            "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            cal_items = json.loads(res.read()).get("items", [])
+        calendar_ids = [c["id"] for c in cal_items
+                        if c.get("accessRole") in ("owner", "writer")]
+        if DEBUG:
+            for c in cal_items:
+                mark = "○" if c.get("accessRole") in ("owner", "writer") else "×"
+                print(f"  [DEBUG] カレンダー {mark} {c.get('summary')} ({c.get('accessRole')})")
+    except Exception as e:
+        print(f"  [WARN] カレンダー一覧取得失敗（primary のみ使用）: {e}")
+        calendar_ids = []
+    if not calendar_ids:
+        calendar_ids = ["primary"]
+
     # 対象日の開始・終了を ISO 8601 で生成
     if target_date is None:
         target_date = datetime.now(JST).date()
@@ -162,26 +198,39 @@ def get_gcal_events(client_id: str, client_secret: str, refresh_token: str, targ
         "singleEvents":  "true",
         "orderBy":       "startTime",
     })
-    try:
-        req = urllib.request.Request(
-            f"https://www.googleapis.com/calendar/v3/calendars/primary/events?{params}",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as res:
-            items = json.loads(res.read()).get("items", [])
-    except Exception as e:
-        print(f"  [WARN] Google Calendar イベント取得失敗: {e}")
-        return []
 
+    # 全カレンダーの予定を集めて時刻順に並べる（終日予定は先頭）
+    collected: list[tuple[str, str]] = []
+    for cal_id in calendar_ids:
+        try:
+            req = urllib.request.Request(
+                f"https://www.googleapis.com/calendar/v3/calendars/"
+                f"{urllib.parse.quote(cal_id)}/events?{params}",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as res:
+                items = json.loads(res.read()).get("items", [])
+        except Exception as e:
+            print(f"  [WARN] Google Calendar イベント取得失敗 ({cal_id}): {e}")
+            continue
+        for item in items:
+            if item.get("status") == "cancelled":
+                continue
+            summary = item.get("summary", "(無題)")
+            start = item.get("start", {})
+            if "dateTime" in start:
+                dt = datetime.fromisoformat(start["dateTime"]).astimezone(JST)
+                collected.append((dt.isoformat(), f"{dt.strftime('%H:%M')} {summary}"))
+            else:
+                collected.append(("", f"終日 {summary}"))
+
+    # 同一予定が複数カレンダーに載っている場合の重複を除去
     events: list[str] = []
-    for item in items:
-        summary = item.get("summary", "(無題)")
-        start = item.get("start", {})
-        if "dateTime" in start:
-            dt = datetime.fromisoformat(start["dateTime"])
-            events.append(f"{dt.strftime('%H:%M')} {summary}")
-        else:
-            events.append(f"終日 {summary}")
+    seen: set[str] = set()
+    for _, text in sorted(collected, key=lambda x: x[0]):
+        if text not in seen:
+            events.append(text)
+            seen.add(text)
     return events
 
 
@@ -772,6 +821,7 @@ def build_data_items(
     url_summaries: list[dict],
     location_names: list[str],
     movie_infos: list[dict],
+    health_data: dict = {},
 ) -> list[str]:
     """記事に必ず反映すべきデータ項目の一覧を作る（反映漏れ検査用）。"""
     items: list[str] = []
@@ -781,6 +831,19 @@ def build_data_items(
     items += [f"共有URL: {s['title'] or s['url']}" for s in url_summaries]
     items += [f"訪問場所: {n}" for n in location_names]
     items += [f"映画: {m['title']}" for m in movie_infos]
+    if health_data.get("steps") is not None:
+        items.append(f"健康: 歩数 {health_data['steps']:,}歩")
+    if health_data.get("sleep_minutes") is not None:
+        h, m = divmod(health_data["sleep_minutes"], 60)
+        items.append(f"健康: 睡眠時間 {h}時間{m}分" if m else f"健康: 睡眠時間 {h}時間")
+    if health_data.get("distance_km"):
+        items.append(f"健康: 移動距離 {health_data['distance_km']}km")
+    if health_data.get("calories"):
+        items.append(f"健康: 消費カロリー 約{health_data['calories']:,}kcal")
+    if health_data.get("active_minutes"):
+        items.append(f"健康: アクティブ時間 {health_data['active_minutes']}分")
+    if health_data.get("exercises"):
+        items.append("健康: 運動 " + "、".join(health_data["exercises"]))
     return items
 
 
@@ -1005,7 +1068,7 @@ def format_with_gemini(
 {feedback_section}
 【要件】
 {requirements}{weekly_req}
-- 【健康データ（Fitbit）】がある場合は、メモの有無にかかわらず、歩数・睡眠時間に必ず本文中で触れ、一言感想を添える（例：「今日はよく歩いた」「あまり動けなかったので明日は意識したい」「しっかり眠れた」など）。大げさにせず、さらっと触れる程度でよい
+- 【健康データ（Fitbit）】がある場合は、メモの有無にかかわらず、記載のある項目（歩数・睡眠時間・移動距離・消費カロリー・アクティブ時間・検出された運動）は全て本文中で触れる。歩数と睡眠には一言感想を添える（例：「今日はよく歩いた」「あまり動けなかったので明日は意識したい」「しっかり眠れた」など）。大げさにせず、さらっと触れる程度でよい
 - ポジティブな出来事は少しだけ前向きに表現してよいが、大げさにしない
 - タイトルは 20 字以内で簡潔に
 - 本文の末尾に「本日のよかったこと」セクションを必ず追加する
@@ -1451,6 +1514,7 @@ def main():
             data_items = build_data_items(
                 messages, gcal_events, github_activity,
                 url_summaries, location_names, movie_infos,
+                health_data=health_data,
             )
             missing = check_article_coverage(data_items, body)
             for retry in range(1, 3):

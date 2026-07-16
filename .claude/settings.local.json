@@ -22,7 +22,12 @@
       "PowerShell(py -m py_compile post.py)",
       "PowerShell(if \\($?\\) { \"OK\" })",
       "PowerShell(if \\($?\\) { \"compile OK\" })",
-      "PowerShell(py \"C:\\\\Users\\\\R87CD~1.NAD\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-r-nadatani-myGit-memoryex-memoryex\\\\5c587eb0-5bec-41ff-9faf-1a5258233458\\\\scratchpad\\\\test_coverage.py\")"
+      "PowerShell(py \"C:\\\\Users\\\\R87CD~1.NAD\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-r-nadatani-myGit-memoryex-memoryex\\\\5c587eb0-5bec-41ff-9faf-1a5258233458\\\\scratchpad\\\\test_coverage.py\")",
+      "PowerShell(gh run list --workflow daily_post.yml --limit 5)",
+      "PowerShell($r = Invoke-WebRequest -Uri \"https://nadaryu.jugem.cc/?mode=rss\" -UseBasicParsing -TimeoutSec 20; [System.IO.File]::WriteAllText\\(\"$env:TEMP\\\\claude_blog_rss.xml\", $r.Content\\); \"saved: \" + $r.Content.Length + \" chars\")",
+      "PowerShell([xml]$rss = [System.IO.File]::ReadAllText\\(\"$env:TEMP\\\\claude_blog_rss.xml\"\\); $rss.rdf.item | Select-Object -First 3 | ForEach-Object { \"=== \" + $_.title + \" \\(\" + $_.date + \"\\) ===\" })",
+      "mcp__7abee09f-2a7f-455c-81f9-6d2618eefa12__list_calendars",
+      "mcp__7abee09f-2a7f-455c-81f9-6d2618eefa12__list_events"
     ]
   }
 }

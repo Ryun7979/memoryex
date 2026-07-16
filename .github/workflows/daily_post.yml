@@ -42,7 +42,9 @@ jobs:
           PYTHONUNBUFFERED: "1"
           WEATHER_LOCATION: ${{ vars.WEATHER_LOCATION }}
           GITHUB_USERNAME:  ${{ github.repository_owner }}
-          GH_API_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          # GH_PAT（個人アクセストークン）を登録すればそちらを優先。
+          # GITHUB_TOKEN はユーザー系 API で 403 になるため、その場合は認証なしで再試行される
+          GH_API_TOKEN:     ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           GCAL_CLIENT_ID:   ${{ secrets.GCAL_CLIENT_ID }}
           GCAL_CLIENT_SECRET: ${{ secrets.GCAL_CLIENT_SECRET }}
           GCAL_REFRESH_TOKEN: ${{ secrets.GCAL_REFRESH_TOKEN }}
