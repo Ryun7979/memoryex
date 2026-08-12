@@ -61,8 +61,53 @@ def get_weather(location: str) -> str:
         return ""
 
 
-def get_github_activity(username: str, token: str = "") -> list[str]:
-    """GitHub API から今日（JST）のアクティビティを取得する。"""
+def _fetch_push_commits(repo_full: str, before: str, head: str, token: str = "") -> list[str]:
+    """PushEvent のコミットメッセージ一覧を取得する。
+
+    Events API の PushEvent payload には commits が含まれない（ref/head/before のみ）ため、
+    compare API で before...head の差分を引いて補う。public リポジトリなら認証不要。
+    """
+    if not head:
+        return []
+    if before and before != "0" * 40:
+        url = f"https://api.github.com/repos/{repo_full}/compare/{before}...{head}"
+    else:
+        # 新規ブランチの push は compare できないので head の1コミットだけ取る
+        url = f"https://api.github.com/repos/{repo_full}/commits/{head}"
+
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "memoryex"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as res:
+            data = json.loads(res.read())
+    except Exception as e:
+        # 他リポジトリでは GITHUB_TOKEN が 403 になるため認証なしで再試行する
+        if token:
+            headers.pop("Authorization", None)
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as res:
+                    data = json.loads(res.read())
+            except Exception as e2:
+                print(f"  [WARN] コミット取得失敗 ({repo_full}): {_format_http_error(e2)}")
+                return []
+        else:
+            print(f"  [WARN] コミット取得失敗 ({repo_full}): {_format_http_error(e)}")
+            return []
+
+    commits = data.get("commits") if isinstance(data.get("commits"), list) else [data]
+    messages: list[str] = []
+    for c in commits:
+        msg = (c.get("commit", {}).get("message") or "").splitlines()
+        if msg and msg[0].strip():
+            messages.append(msg[0].strip())
+    return messages
+
+
+def get_github_activity(username: str, token: str = "", target_date=None) -> list[str]:
+    """GitHub API から対象日（JST）のアクティビティを取得する。"""
     if not username:
         return []
     url = f"https://api.github.com/users/{username}/events?per_page=100"
@@ -91,7 +136,9 @@ def get_github_activity(username: str, token: str = "") -> list[str]:
             print(f"  [WARN] GitHub アクティビティ取得失敗: {_format_http_error(e)}")
             return []
 
-    today = datetime.now(JST).date()
+    # 記事の対象日に合わせる（深夜実行では前日が対象になるため now では合わない）
+    if target_date is None:
+        target_date = datetime.now(JST).date()
     activities: list[str] = []
     seen: set[str] = set()
 
@@ -99,16 +146,29 @@ def get_github_activity(username: str, token: str = "") -> list[str]:
         created_at = datetime.strptime(
             event["created_at"], "%Y-%m-%dT%H:%M:%SZ"
         ).replace(tzinfo=timezone.utc).astimezone(JST)
-        if created_at.date() != today:
+        if created_at.date() != target_date:
             continue
 
         etype = event.get("type", "")
-        repo = event.get("repo", {}).get("name", "").split("/")[-1]
+        repo_full = event.get("repo", {}).get("name", "")
+        repo = repo_full.split("/")[-1]
         payload = event.get("payload", {})
 
         if etype == "PushEvent":
-            for c in payload.get("commits", []):
-                msg = c.get("message", "").splitlines()[0]
+            # payload に commits があればそれを使い、無ければ compare API で引く
+            msgs = [c.get("message", "").splitlines()[0]
+                    for c in payload.get("commits", []) if c.get("message")]
+            if not msgs:
+                msgs = _fetch_push_commits(
+                    repo_full, payload.get("before", ""), payload.get("head", ""), token
+                )
+            if not msgs:
+                # メッセージが取れなくても push した事実は記録に残す
+                key = f"push:{repo}:{payload.get('head', '')}"
+                if key not in seen:
+                    activities.append(f"{repo} にコミットをプッシュ")
+                    seen.add(key)
+            for msg in msgs:
                 key = f"push:{repo}:{msg}"
                 if key not in seen:
                     activities.append(f"{repo} にコミット: {msg}")
@@ -646,7 +706,7 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
     # （デフォルトは古い順100件のため、更新が多い日に当日分が切り捨てられる）
     url = (
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-        "/getUpdates?limit=100&offset=-100&allowed_updates=[\"message\"]"
+        "/getUpdates?limit=100&offset=-100&allowed_updates=[\"message\",\"channel_post\"]"
     )
     try:
         with urllib.request.urlopen(url, timeout=15) as res:
@@ -664,6 +724,14 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
         print(f"  （深夜実行のため前日 {target_date} のメッセージを取得）")
     else:
         target_date = now_jst.date()
+
+    # 取得ウィンドウの下限は「対象日の前日 23:00」。
+    # 投稿は 23:00 起動のため、対象日ちょうどで区切ると前日 23:00〜24:00 に
+    # 送ったメモがどの実行でも拾われず永久に消える。前回投稿以降を全て拾う。
+    cutoff = datetime(
+        target_date.year, target_date.month, target_date.day, tzinfo=JST
+    ) - timedelta(hours=1)
+
     messages: list[str] = []
     url_pattern = re.compile(r"https?://\S+")
     movie_pattern = re.compile(r"^映画[　 :：、,]?\s*(.+)", re.MULTILINE)
@@ -687,7 +755,7 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
         ts = datetime.fromtimestamp(msg["date"], tz=JST)
         date_key = ts.date().isoformat()
         diag_dates[date_key] = diag_dates.get(date_key, 0) + 1
-        if ts.date() != target_date:
+        if ts < cutoff:
             continue
         # 写真などのキャプション付きメッセージもメモとして扱う
         text = (msg.get("text") or msg.get("caption") or "").strip()
@@ -713,7 +781,10 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
     # 診断ログ: 何件届いていて、なぜメモ0件なのかを毎回出力する
     date_summary = ", ".join(f"{d}: {n}件" for d, n in sorted(diag_dates.items())) or "なし"
     print(f"  [診断] 取得した更新: {len(updates)} 件 / 対象日: {target_date}")
+    print(f"  [診断] 取得範囲: {cutoff.strftime('%m/%d %H:%M')} 以降")
     print(f"  [診断] 日付別の内訳: {date_summary}")
+    if len(updates) >= 100:
+        print("  [診断] 取得上限 100 件に達しました。古いメモが切り捨てられた可能性があります")
     if diag_other_chat:
         print(f"  [診断] 対象外チャットの更新: {diag_other_chat} 件")
     if diag_no_text:
@@ -872,6 +943,8 @@ def check_article_coverage(items: list[str], body: str) -> list[str]:
 - 言い換え・要約されていても、その項目の内容に触れていれば「反映されている」とみなす
 - 会社名・団体名・人名が「ある会社」「知人」などの曖昧な表現に置き換えられていても「反映されている」とみなす
 - 項目の内容が本文のどこにも一切登場しない場合のみ「未反映」とする
+- ただし「メモ: 」で始まる項目は厳密に判定する。そのメモ固有の出来事・対象・行動が
+  本文から読み取れない場合は、雰囲気が似ているだけでは「反映されている」とみなさず「未反映」とする
 
 【データ項目】
 {numbered}
@@ -881,14 +954,17 @@ def check_article_coverage(items: list[str], body: str) -> list[str]:
 
 未反映の項目の番号だけを JSON 配列で返してください（例: [2, 5]）。
 全て反映されていれば [] を返してください。JSON 配列のみを返すこと。"""
-    try:
-        raw = _call_gemini(prompt, effort="low")
-        nums = json.loads(raw)
-        return [items[n - 1] for n in nums
-                if isinstance(n, int) and 1 <= n <= len(items)]
-    except Exception as e:
-        print(f"  [WARN] 反映漏れチェック失敗（チェックをスキップ）: {e}")
-        return []
+    # 1回目に失敗すると漏れが素通りするため、effort を上げて1度だけ再試行する
+    for effort in ("low", "high"):
+        try:
+            raw = _call_gemini(prompt, effort=effort)
+            nums = json.loads(raw)
+            return [items[n - 1] for n in nums
+                    if isinstance(n, int) and 1 <= n <= len(items)]
+        except Exception as e:
+            print(f"  [WARN] 反映漏れチェック失敗（effort={effort}）: {e}")
+    print("  [WARN] 反映漏れチェックを2回試みて失敗したため、チェックをスキップします")
+    return []
 
 
 def format_with_gemini(
@@ -1451,7 +1527,7 @@ def main():
             weather = get_weather(WEATHER_LOCATION)
             if weather:
                 print(f"   天気: {weather}")
-            github_activity = get_github_activity(GITHUB_USERNAME, GH_API_TOKEN)
+            github_activity = get_github_activity(GITHUB_USERNAME, GH_API_TOKEN, target_date)
             if github_activity:
                 print(f"   GitHub: {len(github_activity)} 件")
             gcal_events = get_gcal_events(GCAL_CLIENT_ID, GCAL_CLIENT_SECRET, GCAL_REFRESH_TOKEN, target_date)

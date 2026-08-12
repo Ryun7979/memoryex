@@ -42,7 +42,10 @@
       "Bash(TRIALS=3 PYTHONIOENCODING=utf-8 py compare_hard.py)",
       "Bash(PYTHONIOENCODING=utf-8 py -m py_compile post.py)",
       "Bash(PYTHONIOENCODING=utf-8 grep -n \"^if __name__\" post.py)",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(gh auth *)",
+      "Bash(curl -s -H \"Accept: application/vnd.github+json\" -H \"User-Agent: memoryex\" \"https://api.github.com/users/Ryun7979/events?per_page=100\" -o /tmp/ev.json -w \"HTTP:%{http_code}\\\\n\")",
+      "Bash(python -c ' *)"
     ]
   }
 }
