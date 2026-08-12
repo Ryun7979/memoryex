@@ -25,7 +25,7 @@ JUGEM_PASS       = os.environ["JUGEM_PASS"]
 
 JST              = timezone(timedelta(hours=9))
 BLOG_BASE_URL    = "https://nadaryu.jugem.cc"
-GEMINI_MODELS    = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+GEMINI_MODELS    = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
 DEBUG            = os.environ.get("DEBUG_MODE", "").lower() in ("1", "true", "yes")
 
 WEATHER_LOCATION   = os.environ.get("WEATHER_LOCATION", "")
@@ -758,21 +758,30 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 
-def _call_gemini(prompt: str, thinking_budget: int = 5000) -> str:
-    """Gemini API を呼び出して生成テキストを返す（モデルフォールバック付き）。"""
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 1.0,          # thinking 有効時は 1.0 が推奨
-            "thinkingConfig": {
-                "thinkingBudget": thinking_budget,  # thinking トークン上限（0=無効、-1=動的）
-            },
-        },
-    }).encode()
+def _thinking_config(model: str, effort: str) -> dict:
+    """モデル世代ごとに thinking の指定方法が異なるため吸収する。
 
+    2.5 系: thinkingBudget（thinking トークン上限の整数）
+    3.x 系: thinkingLevel（minimal/low/medium/high の列挙）
+    両者は非互換で、2.5 用の指定を 3.x に送ると 400 になる。
+    """
+    if model.startswith("gemini-2."):
+        return {"thinkingBudget": 5000 if effort == "high" else 2000}
+    return {"thinkingLevel": "medium" if effort == "high" else "low"}
+
+
+def _call_gemini(prompt: str, effort: str = "high") -> str:
+    """Gemini API を呼び出して生成テキストを返す（モデルフォールバック付き）。"""
     last_error = None
     data = None
     for model in GEMINI_MODELS:
+        payload = json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 1.0,      # thinking 有効時は 1.0 が推奨
+                "thinkingConfig": _thinking_config(model, effort),
+            },
+        }).encode()
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"{model}:generateContent"
@@ -873,7 +882,7 @@ def check_article_coverage(items: list[str], body: str) -> list[str]:
 未反映の項目の番号だけを JSON 配列で返してください（例: [2, 5]）。
 全て反映されていれば [] を返してください。JSON 配列のみを返すこと。"""
     try:
-        raw = _call_gemini(prompt, thinking_budget=2000)
+        raw = _call_gemini(prompt, effort="low")
         nums = json.loads(raw)
         return [items[n - 1] for n in nums
                 if isinstance(n, int) and 1 <= n <= len(items)]
@@ -1004,7 +1013,8 @@ def format_with_gemini(
 - 補足情報（カレンダー・GitHub・訪問場所・映画・健康データ）はメモとは独立した段落として記述する。メモの話題と無理につなげない
 - 天気は冒頭に一文で添える程度でよい
 - 【共有URL】がある場合は、本文とは別に「本日の気になったインターネット」セクションを設ける
-  - 形式: <p><b>本日の気になったインターネット</b></p><ul><li><a href="URL">タイトル</a> — 紹介文</li>...</ul>
+  - 形式: <p><b>本日の気になったインターネット</b></p><ul><li><a href="URL">タイトル</a> - 紹介文</li>...</ul>
+  - 各リンクには必ず1文の紹介文を添える（「紹介文」という語をそのまま書かない）
 - カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える"""
     else:
         memo_section = ""
@@ -1014,7 +1024,7 @@ def format_with_gemini(
 - 天気は短く触れる程度でよい
 - 【健康データ（Fitbit）】がある場合は、歩数や睡眠について本文中で必ず触れる
 - 【本日のニュース】がある場合は「本日のニュースピックアップ」セクションを設ける
-  - 形式: <p><b>本日のニュースピックアップ</b></p><ul><li><a href="URL">タイトル</a> — 概要</li>...</ul>
+  - 形式: <p><b>本日のニュースピックアップ</b></p><ul><li><a href="URL">タイトル</a> - 概要</li>...</ul>
   - ニュースは事実のみ掲載し、個人的な意見や感想は加えない
 - カレンダーの予定に含まれる著名な会社名・組織名・個人名は、そのまま記載せず「ある会社」「ある団体」「知人」などの曖昧な表現に置き換える"""
 

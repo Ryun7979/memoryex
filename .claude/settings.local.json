@@ -27,7 +27,22 @@
       "PowerShell($r = Invoke-WebRequest -Uri \"https://nadaryu.jugem.cc/?mode=rss\" -UseBasicParsing -TimeoutSec 20; [System.IO.File]::WriteAllText\\(\"$env:TEMP\\\\claude_blog_rss.xml\", $r.Content\\); \"saved: \" + $r.Content.Length + \" chars\")",
       "PowerShell([xml]$rss = [System.IO.File]::ReadAllText\\(\"$env:TEMP\\\\claude_blog_rss.xml\"\\); $rss.rdf.item | Select-Object -First 3 | ForEach-Object { \"=== \" + $_.title + \" \\(\" + $_.date + \"\\) ===\" })",
       "mcp__7abee09f-2a7f-455c-81f9-6d2618eefa12__list_calendars",
-      "mcp__7abee09f-2a7f-455c-81f9-6d2618eefa12__list_events"
+      "mcp__7abee09f-2a7f-455c-81f9-6d2618eefa12__list_events",
+      "PowerShell(git push origin main 2>&1)",
+      "PowerShell(cmdkey /delete:\"LegacyGeneric:target=git:https://github.com\")",
+      "PowerShell(cmdkey /delete:\"LegacyGeneric:target=git:https://Ryun7979@github.com\")",
+      "PowerShell(git fetch origin)",
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(py compare_models.py)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(PYTHONIOENCODING=utf-8 py compare_models.py)",
+      "Bash(PYTHONIOENCODING=utf-8 py compare_hard.py)",
+      "Bash(PYTHONIOENCODING=utf-8 py -c ' *)",
+      "Bash(cp compare_hard_result.json run1.json)",
+      "Bash(TRIALS=3 PYTHONIOENCODING=utf-8 py compare_hard.py)",
+      "Bash(PYTHONIOENCODING=utf-8 py -m py_compile post.py)",
+      "Bash(PYTHONIOENCODING=utf-8 grep -n \"^if __name__\" post.py)",
+      "Bash(git checkout *)"
     ]
   }
 }
