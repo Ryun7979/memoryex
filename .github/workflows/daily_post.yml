@@ -16,6 +16,13 @@ on:
         default: "false"
         type: boolean
 
+# collect.yml と同じ Gist を読み書きするため、同じグループで直列化して PATCH の競合を防ぐ
+# 本ワークフローは最長3時間動くため、その間 collect.yml の定期実行は待たされるが、
+# post.py 自身が各試行で collect_once() を呼んで収集するため取りこぼしは発生しない
+concurrency:
+  group: collect-telegram-memos
+  cancel-in-progress: false
+
 jobs:
   post:
     runs-on: ubuntu-latest
@@ -49,5 +56,7 @@ jobs:
           GCAL_CLIENT_SECRET: ${{ secrets.GCAL_CLIENT_SECRET }}
           GCAL_REFRESH_TOKEN: ${{ secrets.GCAL_REFRESH_TOKEN }}
           TMDB_API_KEY:         ${{ secrets.TMDB_API_KEY }}
+          GIST_ID:              ${{ secrets.GIST_ID }}
+          GIST_TOKEN:           ${{ secrets.GIST_TOKEN }}
           GHEALTH_REFRESH_TOKEN: ${{ secrets.GHEALTH_REFRESH_TOKEN }}
         run: python post.py

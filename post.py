@@ -16,6 +16,10 @@ import xml.etree.ElementTree as ET
 import email.utils
 from datetime import datetime, timezone, timedelta
 
+import collect
+import coverage
+import notify
+
 # ── 設定 ────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -35,6 +39,8 @@ GCAL_CLIENT_ID        = os.environ.get("GCAL_CLIENT_ID", "")
 GCAL_CLIENT_SECRET    = os.environ.get("GCAL_CLIENT_SECRET", "")
 GCAL_REFRESH_TOKEN    = os.environ.get("GCAL_REFRESH_TOKEN", "")
 TMDB_API_KEY          = os.environ.get("TMDB_API_KEY", "")
+GIST_ID               = os.environ.get("GIST_ID", "")
+GIST_TOKEN            = os.environ.get("GIST_TOKEN", "")
 # Google Fit（Fitbit Air）健康データ用 — クライアントID/SECRETはGCALと同じでも可
 GHEALTH_CLIENT_ID     = os.environ.get("GHEALTH_CLIENT_ID", GCAL_CLIENT_ID)
 GHEALTH_CLIENT_SECRET = os.environ.get("GHEALTH_CLIENT_SECRET", GCAL_CLIENT_SECRET)
@@ -700,23 +706,35 @@ def get_week_posts(start_date, end_date) -> list[dict]:
         return []
 
 
-def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
-    """Telegram から今日（JST）送ったメッセージとURL情報を取得する。"""
-    # offset=-100: キューの「新しい方から」最大100件を取得する。
-    # （デフォルトは古い順100件のため、更新が多い日に当日分が切り捨てられる）
-    url = (
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-        "/getUpdates?limit=100&offset=-100&allowed_updates=[\"message\",\"channel_post\"]"
-    )
-    try:
-        with urllib.request.urlopen(url, timeout=15) as res:
-            data = json.loads(res.read())
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Telegram API 接続エラー: {e}")
+def _load_collected_messages(target_date) -> list[dict]:
+    """収集を1回実行し、Gist から保存済みメモを読む。
 
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram API エラー: {data}")
+    Gist が使えない場合は Telegram を直接読む。その際は offset を渡さないため
+    サーバー側の更新は確定されず、次回の収集で取り直せる。
+    """
+    if GIST_ID and GIST_TOKEN:
+        try:
+            state = collect.collect_once(
+                TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GIST_ID, GIST_TOKEN,
+                today=target_date,
+            )
+            return state["messages"]
+        except Exception as e:
+            print(f"  [WARN] Gist の読み書きに失敗: {e}")
+            print("  [WARN] Telegram を直接読み出します（収集は次回に持ち越し）")
+    else:
+        print("  [WARN] GIST_ID / GIST_TOKEN が未設定のため Telegram を直接読み出します")
 
+    fetch_limit = 100
+    updates = collect.fetch_updates(TELEGRAM_TOKEN, 0, limit=fetch_limit)
+    if len(updates) >= fetch_limit:
+        print(f"  [WARN] Telegram の取得が上限{fetch_limit}件に達しました。この経路はキューの古い側から返すため、")
+        print("  [WARN] 当日分のメモを取りこぼした可能性があります。Gist の復旧を優先してください")
+    return collect.extract_messages(updates, TELEGRAM_CHAT_ID)
+
+
+def get_today_messages():
+    """収集済みメモから対象日のメモ・URL・位置情報・映画を取り出す。"""
     now_jst = datetime.now(JST)
     # 深夜0〜6時に実行された場合は前日のメッセージを対象にする
     if now_jst.hour < 6:
@@ -727,10 +745,14 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
 
     # 取得ウィンドウの下限は「対象日の前日 23:00」。
     # 投稿は 23:00 起動のため、対象日ちょうどで区切ると前日 23:00〜24:00 に
-    # 送ったメモがどの実行でも拾われず永久に消える。前回投稿以降を全て拾う。
+    # 送ったメモがどの実行でも拾われず永久に消える。
     cutoff = datetime(
         target_date.year, target_date.month, target_date.day, tzinfo=JST
     ) - timedelta(hours=1)
+    cutoff_ts = int(cutoff.timestamp())
+
+    stored = _load_collected_messages(target_date)
+    target = [m for m in stored if m.get("ts", 0) >= cutoff_ts]
 
     messages: list[str] = []
     url_pattern = re.compile(r"https?://\S+")
@@ -739,26 +761,8 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
     found_locations: list[dict] = []
     found_movies: list[str] = []
 
-    # 診断カウンタ: メモが取得できない原因をログから特定できるようにする
-    updates = data.get("result", [])
-    diag_dates: dict[str, int] = {}
-    diag_other_chat = 0
-    diag_no_text = 0
-
-    for update in updates:
-        msg = update.get("message") or update.get("channel_post", {})
-        if not msg:
-            continue
-        if str(msg.get("chat", {}).get("id", "")) != str(TELEGRAM_CHAT_ID):
-            diag_other_chat += 1
-            continue
-        ts = datetime.fromtimestamp(msg["date"], tz=JST)
-        date_key = ts.date().isoformat()
-        diag_dates[date_key] = diag_dates.get(date_key, 0) + 1
-        if ts < cutoff:
-            continue
-        # 写真などのキャプション付きメッセージもメモとして扱う
-        text = (msg.get("text") or msg.get("caption") or "").strip()
+    for item in target:
+        text = item.get("text", "")
         if text:
             messages.append(text)
             for u in url_pattern.findall(text):
@@ -768,27 +772,19 @@ def get_today_messages() -> tuple[list[str], list[dict], list[str]]:
                 t = m.strip()
                 if t and t not in found_movies:
                     found_movies.append(t)
-        else:
-            diag_no_text += 1
-        # 位置情報メッセージを収集
-        loc = msg.get("location")
+        loc = item.get("location")
         if loc:
-            found_locations.append({
-                "lat": loc["latitude"],
-                "lon": loc["longitude"],
-            })
+            found_locations.append(loc)
 
-    # 診断ログ: 何件届いていて、なぜメモ0件なのかを毎回出力する
+    # 診断ログ: 保存済みメモが何件あり、そのうち何件が対象日かを毎回出力する
+    diag_dates: dict[str, int] = {}
+    for m in stored:
+        d = m.get("date", "不明")
+        diag_dates[d] = diag_dates.get(d, 0) + 1
     date_summary = ", ".join(f"{d}: {n}件" for d, n in sorted(diag_dates.items())) or "なし"
-    print(f"  [診断] 取得した更新: {len(updates)} 件 / 対象日: {target_date}")
-    print(f"  [診断] 取得範囲: {cutoff.strftime('%m/%d %H:%M')} 以降")
+    print(f"  [診断] 保存済みメモ: {len(stored)} 件 / 対象日: {target_date}")
+    print(f"  [診断] 取得範囲: {cutoff.strftime('%m/%d %H:%M')} 以降 → {len(target)} 件")
     print(f"  [診断] 日付別の内訳: {date_summary}")
-    if len(updates) >= 100:
-        print("  [診断] 取得上限 100 件に達しました。古いメモが切り捨てられた可能性があります")
-    if diag_other_chat:
-        print(f"  [診断] 対象外チャットの更新: {diag_other_chat} 件")
-    if diag_no_text:
-        print(f"  [診断] テキストなし（スタンプ・位置情報等）: {diag_no_text} 件")
 
     # URL のタイトル・概要を取得（最大5件）
     url_summaries: list[dict] = []
@@ -894,79 +890,6 @@ def _call_gemini(prompt: str, effort: str = "high") -> str:
     return _strip_code_fences(data["candidates"][0]["content"]["parts"][0]["text"])
 
 
-def build_data_items(
-    messages: list[str],
-    gcal_events: list[str],
-    github_activity: list[str],
-    url_summaries: list[dict],
-    location_names: list[str],
-    movie_infos: list[dict],
-    health_data: dict = {},
-) -> list[str]:
-    """記事に必ず反映すべきデータ項目の一覧を作る（反映漏れ検査用）。"""
-    items: list[str] = []
-    items += [f"メモ: {m}" for m in messages]
-    items += [f"予定: {e}" for e in gcal_events]
-    items += [f"GitHub: {a}" for a in github_activity]
-    items += [f"共有URL: {s['title'] or s['url']}" for s in url_summaries]
-    items += [f"訪問場所: {n}" for n in location_names]
-    items += [f"映画: {m['title']}" for m in movie_infos]
-    if health_data.get("steps") is not None:
-        items.append(f"健康: 歩数 {health_data['steps']:,}歩")
-    if health_data.get("sleep_minutes") is not None:
-        h, m = divmod(health_data["sleep_minutes"], 60)
-        items.append(f"健康: 睡眠時間 {h}時間{m}分" if m else f"健康: 睡眠時間 {h}時間")
-    if health_data.get("distance_km"):
-        items.append(f"健康: 移動距離 {health_data['distance_km']}km")
-    if health_data.get("calories"):
-        items.append(f"健康: 消費カロリー 約{health_data['calories']:,}kcal")
-    if health_data.get("active_minutes"):
-        items.append(f"健康: アクティブ時間 {health_data['active_minutes']}分")
-    if health_data.get("exercises"):
-        items.append("健康: 運動 " + "、".join(health_data["exercises"]))
-    return items
-
-
-def check_article_coverage(items: list[str], body: str) -> list[str]:
-    """記事本文に反映されていないデータ項目を Gemini に判定させて返す。
-    判定に失敗した場合は空リストを返す（投稿自体は止めない）。
-    """
-    if not items:
-        return []
-    plain = re.sub(r"<[^>]+>", " ", body)
-    plain = re.sub(r"\s+", " ", plain).strip()
-    numbered = "\n".join(f"{i}. {it}" for i, it in enumerate(items, 1))
-    prompt = f"""\
-以下の【データ項目】のそれぞれが【記事本文】に反映されているかを判定してください。
-
-判定基準:
-- 言い換え・要約されていても、その項目の内容に触れていれば「反映されている」とみなす
-- 会社名・団体名・人名が「ある会社」「知人」などの曖昧な表現に置き換えられていても「反映されている」とみなす
-- 項目の内容が本文のどこにも一切登場しない場合のみ「未反映」とする
-- ただし「メモ: 」で始まる項目は厳密に判定する。そのメモ固有の出来事・対象・行動が
-  本文から読み取れない場合は、雰囲気が似ているだけでは「反映されている」とみなさず「未反映」とする
-
-【データ項目】
-{numbered}
-
-【記事本文】
-{plain}
-
-未反映の項目の番号だけを JSON 配列で返してください（例: [2, 5]）。
-全て反映されていれば [] を返してください。JSON 配列のみを返すこと。"""
-    # 1回目に失敗すると漏れが素通りするため、effort を上げて1度だけ再試行する
-    for effort in ("low", "high"):
-        try:
-            raw = _call_gemini(prompt, effort=effort)
-            nums = json.loads(raw)
-            return [items[n - 1] for n in nums
-                    if isinstance(n, int) and 1 <= n <= len(items)]
-        except Exception as e:
-            print(f"  [WARN] 反映漏れチェック失敗（effort={effort}）: {e}")
-    print("  [WARN] 反映漏れチェックを2回試みて失敗したため、チェックをスキップします")
-    return []
-
-
 def format_with_gemini(
     messages: list[str],
     weather: str = "",
@@ -992,24 +915,27 @@ def format_with_gemini(
     if weather:
         extra_sections += f"\n【天気】\n{weather}\n"
     if gcal_events:
-        extra_sections += "\n【今日の予定】\n" + "\n".join(f"・{e}" for e in gcal_events) + "\n"
+        lines = [f"[C{i}] {e}" for i, e in enumerate(gcal_events, 1)]
+        extra_sections += "\n【今日の予定】\n" + "\n".join(lines) + "\n"
     if github_activity:
-        extra_sections += "\n【GitHub 活動】\n" + "\n".join(f"・{a}" for a in github_activity) + "\n"
+        lines = [f"[G{i}] {a}" for i, a in enumerate(github_activity, 1)]
+        extra_sections += "\n【GitHub 活動】\n" + "\n".join(lines) + "\n"
     if url_summaries:
         lines = []
-        for s in url_summaries:
-            line = f"・タイトル: {s['title']}"
+        for i, s in enumerate(url_summaries, 1):
+            line = f"[U{i}] タイトル: {s['title']}"
             if s["description"]:
                 line += f"\n  紹介: {s['description']}"
             line += f"\n  URL: {s['url']}"
             lines.append(line)
         extra_sections += "\n【共有URL】\n" + "\n".join(lines) + "\n"
     if location_names:
-        extra_sections += "\n【訪問場所】\n" + "\n".join(f"・{n}" for n in location_names) + "\n"
+        lines = [f"[L{i}] {n}" for i, n in enumerate(location_names, 1)]
+        extra_sections += "\n【訪問場所】\n" + "\n".join(lines) + "\n"
     if movie_infos:
         lines = []
-        for m in movie_infos:
-            line = f"・{m['title']}"
+        for i, m in enumerate(movie_infos, 1):
+            line = f"[V{i}] {m['title']}"
             if m.get("runtime"):
                 line += f"（{m['runtime']}）"
             if m.get("genres"):
@@ -1063,6 +989,7 @@ def format_with_gemini(
         if health_data.get("exercises"):
             lines.append("・検出された運動: " + "、".join(health_data["exercises"]))
         if lines:
+            lines = [f"[H{i}] {line.lstrip('・')}" for i, line in enumerate(lines, 1)]
             extra_sections += "\n【健康データ（Fitbit）】\n" + "\n".join(lines) + "\n"
     if week_posts:
         lines = [f"・{p['date']} 「{p['title']}」: {p['summary']}" for p in week_posts]
@@ -1078,7 +1005,7 @@ def format_with_gemini(
         extra_sections += "\n【本日のニュース】\n" + "\n".join(lines) + "\n"
 
     if has_memo:
-        combined = "\n".join(f"・{m}" for m in messages)
+        combined = "\n".join(f"[M{i}] {m}" for i, m in enumerate(messages, 1))
         memo_section = f"\n【メモ】\n{combined}\n"
         requirements = """\
 - 【メモ】の各行は一つ残らず記事に反映する。一部だけを取り上げて他を省略しない。短いメモや些細なメモも必ず一文以上で触れる
@@ -1151,6 +1078,11 @@ def format_with_gemini(
   - 悪い例：「天気が良かったので外出が楽しめた」（メモに記載がない場合）
 - メモの内容と補足情報は、話題ごとに独立した段落として別々に記述する
 - 【最重要】提供されたデータ（メモの各行・予定の各件・その他セクションの各項目）は全て記事に反映する。出力する前に、各セクションの全項目が本文に含まれているかを一つずつ確認し、漏れがあれば追記してから出力する
+- 各データ項目の先頭にある [M1] [C1] のような ID は本文には書かない。本文に ID を含めてはならない
+- coverage には、提供された全ての ID をキーとして必ず含める。値はその項目に触れている箇所を
+  本文から連続する15文字以上そのまま写した文字列にする
+  - 本文に存在しない文字列を coverage に書いてはならない。要約・言い換えも不可
+  - 該当箇所が本文に無い場合は、まず本文にその内容を書き足してから抜粋を写すこと
 {feedback_section}
 【要件】
 {requirements}{weekly_req}
@@ -1163,7 +1095,7 @@ def format_with_gemini(
 - マークダウン不可
 - 使用する文字は JIS X 0208 の範囲に限る。en ダッシュ（–）・em ダッシュ（—）・カーリークォート（' ' " "）・黒丸（•）などの欧文特殊記号は使用しない
 - 必ず以下の JSON 形式のみで返す（コードブロック不要）:
-{{"title": "記事タイトル", "body": "<h3>...</h3><p>...</p>...<p><b>本日のよかったこと</b></p><ul><li>...</li></ul>"}}
+{{"title": "記事タイトル", "body": "<h3>...</h3><p>...</p>...<p><b>本日のよかったこと</b></p><ul><li>...</li></ul>", "coverage": {{"M1": "本文からそのまま写した抜粋", "C1": "..."}}}}
 {memo_section}
 {extra_sections}"""
 
@@ -1177,21 +1109,7 @@ def format_with_gemini(
 
 def notify_telegram_error(message: str) -> None:
     """エラー発生時に Telegram へ失敗通知を送る。"""
-    payload = json.dumps({
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text":    f"⚠️ ブログ自動投稿 失敗\n\n{message}",
-    }).encode()
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    req = urllib.request.Request(
-        url, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as res:
-            json.loads(res.read())
-    except Exception as e:
-        print(f"  [WARN] Telegram エラー通知失敗: {e}")
+    notify.send_error(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, message)
 
 
 def normalize_for_legacy_encoding(text: str) -> str:
@@ -1595,14 +1513,14 @@ def main():
             body  = article["body"]
             print(f"✅  タイトル: {title}")
 
-            # 3.5 反映漏れチェック: 拾ったデータが全て記事に含まれているか検査し、
-            #     漏れがあれば再生成（最大2回）。それでも漏れたら記事末尾に追記する。
-            data_items = build_data_items(
+            # 3.5 反映漏れチェック: 各データ項目に対応する本文の抜粋を Gemini に返させ、
+            #     その抜粋が本文に実在するかを機械的に照合する。漏れがあれば再生成（最大2回）。
+            #     それでも漏れたら記事末尾に追記する。
+            data_items = coverage.build_labeled_items(
                 messages, gcal_events, github_activity,
-                url_summaries, location_names, movie_infos,
-                health_data=health_data,
+                url_summaries, location_names, movie_infos, health_data,
             )
-            missing = check_article_coverage(data_items, body)
+            missing = coverage.find_missing(data_items, body, article.get("coverage"))
             for retry in range(1, 3):
                 if not missing:
                     break
@@ -1619,7 +1537,7 @@ def main():
                 )
                 title = article["title"]
                 body  = article["body"]
-                missing = check_article_coverage(data_items, body)
+                missing = coverage.find_missing(data_items, body, article.get("coverage"))
             if missing:
                 print(f"⚠️  再生成後も {len(missing)} 件が未反映のため、記事末尾に追記します")
                 lis = "".join(f"<li>{html.escape(x)}</li>" for x in missing)
