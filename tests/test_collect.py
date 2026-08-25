@@ -139,6 +139,24 @@ class FakeResponse:
 
 class FetchUpdatesTest(unittest.TestCase):
 
+    def test_long_pollingで待つ(self):
+        # timeout=0（即時リターン）だと、キューが用意される前に空で返ることがある。
+        # 投稿直前の収集で空振りしないよう long polling で待つことを保証する。
+        captured = {}
+
+        def fake_urlopen(url, timeout=0):
+            captured["url"] = url
+            captured["http_timeout"] = timeout
+            return FakeResponse({"ok": True, "result": []})
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            collect.fetch_updates("TOKEN", 0)
+
+        self.assertGreater(collect.LONG_POLL_SECONDS, 0)
+        self.assertIn(f"timeout={collect.LONG_POLL_SECONDS}", captured["url"])
+        # HTTP 側のタイムアウトが long polling の待ち時間より短いと必ず失敗する
+        self.assertGreater(captured["http_timeout"], collect.LONG_POLL_SECONDS)
+
     def test_offsetが0なら省略する(self):
         captured = {}
 

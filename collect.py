@@ -17,6 +17,9 @@ JST = timezone(timedelta(hours=9))
 # 収集対象の更新種別。編集されたメモも拾えるよう edited_* を含める
 ALLOWED_UPDATES = ["message", "edited_message", "channel_post", "edited_channel_post"]
 
+# getUpdates の long polling 待ち時間（秒）。更新が既にあれば待たずに返る
+LONG_POLL_SECONDS = 10
+
 
 def _pick_message(update: dict) -> dict:
     """更新から本体のメッセージを取り出す。"""
@@ -88,17 +91,23 @@ def fetch_updates(token: str, offset: int, limit: int = 100) -> list:
 
     offset を渡した時点でそれより前の更新は確定（confirm）され、
     サーバー側のキューから外れる。保存済みの範囲のみを確定させること。
+
+    timeout=0（即時リターン）だと、長時間ポーリングされていなかった bot への
+    最初の呼び出しで、サーバーがキューを用意しきる前に空で返ることがある。
+    23:00 の投稿直前の収集で空振りすると、その日の記事に直接響くため
+    long polling で待つ。更新が既にあれば待たずに即座に返る。
     """
     params = {
         "limit": str(limit),
-        "timeout": "0",
+        "timeout": str(LONG_POLL_SECONDS),
         "allowed_updates": json.dumps(ALLOWED_UPDATES),
     }
     if offset > 0:
         params["offset"] = str(offset)
     url = (f"https://api.telegram.org/bot{token}/getUpdates?"
            + urllib.parse.urlencode(params))
-    with urllib.request.urlopen(url, timeout=30) as res:
+    # HTTP 側のタイムアウトは long polling の待ち時間より必ず長くする
+    with urllib.request.urlopen(url, timeout=LONG_POLL_SECONDS + 20) as res:
         data = json.loads(res.read())
     if not data.get("ok"):
         raise RuntimeError(f"Telegram API エラー: {data}")
