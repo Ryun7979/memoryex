@@ -5,6 +5,7 @@
 import json
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -147,6 +148,52 @@ def collect_once(telegram_token: str, chat_id: str, gist_id: str, gist_token: st
     return next_state
 
 
+def _secrets_url() -> str:
+    """このリポジトリの Actions Secrets 設定ページ URL（分かる場合のみ）。"""
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    return f"https://github.com/{repo}/settings/secrets/actions" if repo else ""
+
+
+def _build_auth_error_message(e: "urllib.error.HTTPError") -> str:
+    """認証エラー（401/403）の原因・対処方法・関連URLをまとめたメッセージを作る。
+
+    失敗したリクエスト先URL（GitHub Gist API か Telegram API か）で
+    どちらのトークンが原因かを判定し、再発行手順のリンクまで含める。
+    """
+    url = e.url or getattr(e, "filename", "") or ""
+    secrets_url = _secrets_url()
+
+    if "api.github.com/gists" in url:
+        lines = [
+            f"Gist への認証に失敗しました（HTTP {e.code}）。",
+            "原因: GIST_TOKEN（GitHub の classic PAT, gist スコープ）が失効・取り消しされた可能性があります。",
+            "",
+            "対処方法:",
+            "1. 新しい classic PAT（gist スコープのみ）を発行する",
+            "   https://github.com/settings/tokens/new?scopes=gist&description=memoryex",
+            "2. 発行したトークンでリポジトリの Secrets の GIST_TOKEN を更新する",
+        ]
+    elif "api.telegram.org" in url:
+        lines = [
+            f"Telegram への認証に失敗しました（HTTP {e.code}）。",
+            "原因: TELEGRAM_TOKEN（Bot トークン）が無効化された可能性があります。",
+            "",
+            "対処方法:",
+            "1. @BotFather で /mybots → 対象の Bot → API Token からトークンを再確認・再発行する",
+            "   https://t.me/BotFather",
+            "2. 発行したトークンでリポジトリの Secrets の TELEGRAM_TOKEN を更新する",
+        ]
+    else:
+        lines = [
+            f"認証エラーが発生しました（HTTP {e.code}）: {url}",
+            "GIST_TOKEN または TELEGRAM_TOKEN の有効期限・権限を確認してください。",
+        ]
+    if secrets_url:
+        lines.append(f"   {secrets_url}")
+    lines += ["", f"詳細: {e}"]
+    return "\n".join(lines)
+
+
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
     telegram_token = os.environ["TELEGRAM_TOKEN"]
@@ -157,10 +204,22 @@ def main() -> None:
     print(f"=== 収集開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')} ===", flush=True)
     try:
         collect_once(telegram_token, chat_id, gist_id, gist_token, dry_run=dry_run)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            # 認証エラー（トークン失効・スコープ不足）は待っても自然回復しないため、
+            # 2時間おきの監視でも例外的に通知し、ジョブも失敗させる。
+            msg = _build_auth_error_message(e)
+            print(f"❌ 収集失敗（認証エラー）:\n{msg}")
+            notify.send_error(telegram_token, chat_id, msg)
+            raise
+        print(f"❌ 収集失敗（次回実行で再取得します）: {e}")
+        return
     except Exception as e:
-        print(f"❌ 収集失敗: {e}")
-        notify.send_error(telegram_token, chat_id, f"メモ収集に失敗しました: {e}")
-        raise
+        # それ以外（タイムアウト・5xx・JSON不正など）は一時的な不調とみなし、
+        # 2時間おきの監視のたびに通知・ジョブ失敗にはしない。
+        # offset は保存成功時のみ進むため、次回実行で自動的に同じ範囲を取り直せる。
+        print(f"❌ 収集失敗（次回実行で再取得します）: {e}")
+        return
     print("✅ 収集完了")
 
 
