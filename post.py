@@ -8,6 +8,7 @@ import re
 import html
 import json
 import time
+import threading
 import http.cookiejar
 import urllib.request
 import urllib.error
@@ -837,6 +838,34 @@ def _thinking_config(model: str, effort: str) -> dict:
     return {"thinkingLevel": "medium" if effort == "high" else "low"}
 
 
+def _urlopen_with_deadline(req, deadline_sec: int):
+    """urlopen をバックグラウンドスレッドで実行し、deadline_sec 秒で見切りをつける。
+
+    Gemini のようにチャンクを小刻みに送りながら生成に長時間かかる相手だと、
+    urlopen の timeout は「1回の recv ごと」にしか効かず、リクエスト全体が
+    数十分ハングしても timeout エラーにならないことがある。ここでは全体の
+    上限時間を別スレッドの join で強制する。スレッドは daemon にし、期限切れ後は
+    結果を待たずに諦める（プロセス終了時に道連れで消える）。
+    """
+    result = {}
+
+    def worker():
+        try:
+            with urllib.request.urlopen(req, timeout=deadline_sec) as res:
+                result["data"] = res.read()
+        except Exception as e:
+            result["error"] = e
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(deadline_sec)
+    if t.is_alive():
+        raise TimeoutError(f"Gemini API が {deadline_sec} 秒以内に応答しませんでした")
+    if "error" in result:
+        raise result["error"]
+    return result["data"]
+
+
 def _call_gemini(prompt: str, effort: str = "high") -> str:
     """Gemini API を呼び出して生成テキストを返す（モデルフォールバック付き）。"""
     last_error = None
@@ -864,8 +893,8 @@ def _call_gemini(prompt: str, effort: str = "high") -> str:
         print(f"  Gemini モデル: {model}")
         for attempt in range(5):
             try:
-                with urllib.request.urlopen(req, timeout=30) as res:
-                    data = json.loads(res.read())
+                raw = _urlopen_with_deadline(req, deadline_sec=60)
+                data = json.loads(raw)
                 break
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode()
@@ -880,6 +909,14 @@ def _call_gemini(prompt: str, effort: str = "high") -> str:
                     time.sleep(wait)
                     continue
                 last_error = RuntimeError(f"Gemini API エラー {e.code}: {err_body}")
+                break
+            except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
+                if attempt < 4:
+                    wait = 30 * (attempt + 1)  # 30, 60, 90, 120 秒
+                    print(f"  Gemini 応答なし/通信エラー ({e})。{wait}秒待機後リトライ ({attempt+1}/4)...")
+                    time.sleep(wait)
+                    continue
+                last_error = RuntimeError(f"Gemini API 呼び出し失敗: {e}")
                 break
         if data is not None:
             break
