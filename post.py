@@ -673,35 +673,40 @@ def get_health_data(client_id: str, client_secret: str, refresh_token: str, targ
     return result
 
 
+def _fetch_blog_posts(start_date, end_date) -> list[dict]:
+    """JUGEM の RSS から指定期間の記事一覧を取得する。失敗時は例外を送出する。"""
+    url = f"{BLOG_BASE_URL}/?mode=rss"
+    req = urllib.request.Request(url, headers={"User-Agent": "memoryex/1.0"})
+    with urllib.request.urlopen(req, timeout=10) as res:
+        raw = res.read()
+    root = ET.fromstring(raw)
+    posts: list[dict] = []
+    # RSS 1.0 (RDF) / 2.0 どちらでも拾えるよう名前空間はワイルドカードで探す
+    for item in root.findall(".//{*}item"):
+        title = (item.findtext("{*}title") or "").strip()
+        desc = re.sub(r"<[^>]+>", " ", item.findtext("{*}description") or "")
+        desc = re.sub(r"\s+", " ", desc).strip()[:200]
+        pub = (item.findtext("{*}date") or item.findtext("{*}pubDate") or "").strip()
+        d = None
+        if pub:
+            try:
+                d = datetime.fromisoformat(pub).astimezone(JST).date()
+            except ValueError:
+                try:
+                    d = email.utils.parsedate_to_datetime(pub).astimezone(JST).date()
+                except Exception:
+                    pass
+        if d is None or not (start_date <= d <= end_date):
+            continue
+        posts.append({"date": d.isoformat(), "title": title, "summary": desc})
+    posts.sort(key=lambda p: p["date"])
+    return posts
+
+
 def get_week_posts(start_date, end_date) -> list[dict]:
     """JUGEM の RSS から指定期間の記事一覧を取得する（週間ダイジェスト用）。"""
-    url = f"{BLOG_BASE_URL}/?mode=rss"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "memoryex/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as res:
-            raw = res.read()
-        root = ET.fromstring(raw)
-        posts: list[dict] = []
-        # RSS 1.0 (RDF) / 2.0 どちらでも拾えるよう名前空間はワイルドカードで探す
-        for item in root.findall(".//{*}item"):
-            title = (item.findtext("{*}title") or "").strip()
-            desc = re.sub(r"<[^>]+>", " ", item.findtext("{*}description") or "")
-            desc = re.sub(r"\s+", " ", desc).strip()[:200]
-            pub = (item.findtext("{*}date") or item.findtext("{*}pubDate") or "").strip()
-            d = None
-            if pub:
-                try:
-                    d = datetime.fromisoformat(pub).astimezone(JST).date()
-                except ValueError:
-                    try:
-                        d = email.utils.parsedate_to_datetime(pub).astimezone(JST).date()
-                    except Exception:
-                        pass
-            if d is None or not (start_date <= d <= end_date):
-                continue
-            posts.append({"date": d.isoformat(), "title": title, "summary": desc})
-        posts.sort(key=lambda p: p["date"])
-        return posts
+        return _fetch_blog_posts(start_date, end_date)
     except Exception as e:
         print(f"  [WARN] 週間記事の取得失敗: {e}")
         return []
@@ -743,6 +748,19 @@ def get_today_messages():
         print(f"  （深夜実行のため前日 {target_date} のメッセージを取得）")
     else:
         target_date = now_jst.date()
+        # GitHub Actions のスケジュール遅延で深夜帯(0〜6時)を過ぎてから起動することがある。
+        # その場合、素朴に「今日」扱いにすると前日分の記事が未投稿のまま置き去りになる
+        # （前日分のメモも取得ウィンドウの外に出て記事から抜け落ちる）ため、
+        # ブログの直近記事を確認し、前日分が投稿されていなければそちらを優先する
+        prev_date = target_date - timedelta(days=1)
+        try:
+            recent_posts = _fetch_blog_posts(prev_date - timedelta(days=1), target_date)
+            posted_dates = {p["date"] for p in recent_posts}
+            if prev_date.isoformat() not in posted_dates:
+                target_date = prev_date
+                print(f"  （前日 {target_date} が未投稿のためそちらを優先して取得）")
+        except Exception as e:
+            print(f"  [WARN] 前日投稿有無の確認に失敗: {e}")
 
     # 取得ウィンドウの下限は「対象日の前日 23:00」。
     # 投稿は 23:00 起動のため、対象日ちょうどで区切ると前日 23:00〜24:00 に
