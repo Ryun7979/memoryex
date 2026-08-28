@@ -726,6 +726,16 @@ def _load_collected_messages(target_date) -> list[dict]:
             )
             return state["messages"]
         except Exception as e:
+            partial = getattr(e, "partial_state", None)
+            if partial is not None:
+                # 取得自体は成功しており、Gist への保存だけが失敗したケース。
+                # Telegram の getUpdates は offset=0 で呼び直しても同じ結果が
+                # 返るとは限らないため、ここで取得済みのメモを捨てて再取得すると
+                # 取りこぼす。保存できなかった分は次回に持ち越しつつ、今回は
+                # 取得済みのメモをそのまま使う
+                print(f"  [WARN] Gist への保存に失敗: {e}")
+                print("  [WARN] 収集は次回に持ち越しますが、今回取得したメモはそのまま使います")
+                return partial["messages"]
             print(f"  [WARN] Gist の読み書きに失敗: {e}")
             print("  [WARN] Telegram を直接読み出します（収集は次回に持ち越し）")
     else:

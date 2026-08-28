@@ -121,6 +121,12 @@ def collect_once(telegram_token: str, chat_id: str, gist_id: str, gist_token: st
 
     Gist への保存が成功した場合にのみ offset が永続化されるため、
     途中で失敗しても次回実行で同じ範囲を取り直せる。
+
+    ただし save_state が失敗した場合、例外には取得済みの state を
+    partial_state 属性として付与する。Telegram の getUpdates は
+    offset=0 の再呼び出しでも同じ結果を返すとは限らず、呼び出し側が
+    保存失敗を理由に取得済みメモを捨てて再取得すると一部のメモを
+    取りこぼすことがあるため、失敗時でも取得済みデータを使えるようにする。
     """
     if today is None:
         today = datetime.now(JST).date()
@@ -144,7 +150,11 @@ def collect_once(telegram_token: str, chat_id: str, gist_id: str, gist_token: st
         print("  [dry-run] Gist へは書き込みません")
         return next_state
 
-    gist_store.save_state(gist_id, gist_token, next_state)
+    try:
+        gist_store.save_state(gist_id, gist_token, next_state)
+    except Exception as e:
+        e.partial_state = next_state
+        raise
     return next_state
 
 
