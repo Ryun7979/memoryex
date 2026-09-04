@@ -170,5 +170,36 @@ class FormatWithGeminiIdConsistencyTest(unittest.TestCase):
         self.assertEqual(found_h_ids, expected_h_ids)
 
 
+class RelativeTimeExpressionRuleTest(unittest.TestCase):
+    """メモ中の「昨日」「明日」などの時間表現を、記事の日付の出来事に置き換えない
+    ルールがプロンプトに含まれることを検証する。
+
+    このルールが抜けると、「昨日◯◯した」というメモが当日の出来事として記事化され、
+    事実と日付がずれた記事が投稿されてしまう。"""
+
+    def _capture_prompt(self) -> str:
+        captured = {}
+
+        def fake_call_gemini(prompt, effort="low"):
+            captured["prompt"] = prompt
+            return _fake_call_gemini(prompt, effort)
+
+        with patch.object(post, "_call_gemini", fake_call_gemini):
+            post.format_with_gemini(
+                ["昨日は久しぶりに走った", "明日は病院"],
+                target_date=_FixedDate(dt.date(2026, 8, 25)),
+            )
+        self.assertIn("prompt", captured, "_call_gemini が呼ばれていない")
+        return captured["prompt"]
+
+    def test_相対的な時間表現を保持するルールがプロンプトに含まれる(self):
+        prompt = self._capture_prompt()
+        self.assertIn("その時間関係をそのまま保って記事にする", prompt)
+        # 記事の日付が展開され、「その日の出来事に置き換えない」と明示されている
+        self.assertIn("2026年8月25日の出来事に置き換えない", prompt)
+        # 過去・未来それぞれの扱いが具体例つきで示されている
+        self.assertIn("過去を指すメモは過去の出来事として書く", prompt)
+        self.assertIn("未来を指すメモは予定・見込みとして書き", prompt)
+
 if __name__ == "__main__":
     unittest.main()
